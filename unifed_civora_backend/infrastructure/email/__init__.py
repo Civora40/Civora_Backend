@@ -1,0 +1,2 @@
+"""Transactional email provider adapter."""
+

@@ -1,0 +1,2 @@
+"""Projects migrations package."""
+

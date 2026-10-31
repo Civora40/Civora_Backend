@@ -1,0 +1,27 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables & local secrets
+.env
+.env.local
+*.env
+
+# Local SQLite databases
+*.sqlite3
+db.sqlite3
+
+# Media uploads
+media/
+
+# macOS / IDE metadata
+.DS_Store
+.vscode/
+.idea/
+*.swp
