@@ -18,9 +18,12 @@ DEBUG = get_env("DEBUG", default=(CIVORA_ENV == "development"), cast=bool)
 
 ALLOWED_HOSTS = get_env(
     "ALLOWED_HOSTS",
-    default="localhost,127.0.0.1,0.0.0.0,testserver",
+    default="localhost,127.0.0.1,0.0.0.0,testserver,.onrender.com",
     cast=Csv(),
 )
+RENDER_EXTERNAL_HOSTNAME = get_env("RENDER_EXTERNAL_HOSTNAME", default="")
+if RENDER_EXTERNAL_HOSTNAME and RENDER_EXTERNAL_HOSTNAME not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append(RENDER_EXTERNAL_HOSTNAME)
 
 # ==============================================================================
 # APPLICATION DEFINITION
