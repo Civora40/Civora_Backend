@@ -338,7 +338,15 @@ class Command(BaseCommand):
             },
         )
 
-        # 11. Initial Audit Event
+        # 11. Repair any real (non-seeded) registered user accounts that were previously
+        # attached to seeded organizations (e.g. Apex Coastal Civil Engineering Ltd)
+        from apps.users.serializers import is_seeded_demo_user, sync_user_registered_organization
+
+        for real_user in User.objects.all():
+            if not is_seeded_demo_user(real_user):
+                sync_user_registered_organization(real_user)
+
+        # 12. Initial Audit Event
         record_audit_event(
             action="system.seed_dev_completed",
             target_type="Organization",

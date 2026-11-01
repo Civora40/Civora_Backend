@@ -174,13 +174,28 @@ def register_user_account(
                 assigned_role_slug = SystemRoleSlug.PROJECT_ENGINEER
 
     if not target_org:
-        org_title = (organization_name or "Civora Infrastructure Ltd").strip()
-        target_org = Organization.objects.filter(name__iexact=org_title).first()
-        if not target_org:
-            base_slug = slugify(org_title)[:80] or "civora-org"
+        org_title = (organization_name or "").strip()
+        if org_title:
+            target_org = (
+                Organization.objects.filter(name__iexact=org_title)
+                .exclude(name__in={"Apex Coastal Civil Engineering Ltd", "Civora Core Infrastructure"})
+                .first()
+            )
+            if not target_org:
+                base_slug = slugify(org_title)[:80] or "civora-org"
+                unique_suffix = int(timezone.now().timestamp() * 1000) % 1000000
+                target_org = Organization.objects.create(
+                    name=org_title,
+                    slug=f"{base_slug}-{unique_suffix}",
+                    code=f"ORG-{unique_suffix}",
+                    cac_number="",
+                    country="Nigeria",
+                )
+        else:
+            base_slug = "civora-org"
             unique_suffix = int(timezone.now().timestamp() * 1000) % 1000000
             target_org = Organization.objects.create(
-                name=org_title,
+                name=f"Workspace {unique_suffix}",
                 slug=f"{base_slug}-{unique_suffix}",
                 code=f"ORG-{unique_suffix}",
                 cac_number="",
@@ -192,6 +207,7 @@ def register_user_account(
         first_name = computed_full_name.split(" ")[0]
         last_name = " ".join(computed_full_name.split(" ")[1:])
 
+    clean_org_name = (organization_name or "").strip()
     user = User.objects.create_user(
         email=normalized_email,
         password=password,
@@ -206,7 +222,8 @@ def register_user_account(
         onboarding_step=1,
         onboarding_completed_at=None,
         profile_metadata={
-            "organization": organization_name or target_org.name,
+            "organization": clean_org_name or (target_org.name if invitation else ""),
+            "registeredOrganization": clean_org_name or (target_org.name if invitation else ""),
             "invitationCode": invitation_code or None,
         },
     )

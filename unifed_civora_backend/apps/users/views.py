@@ -179,6 +179,14 @@ class UserOnboardingView(APIView):
         if step_data.get("corenCategory"):
             meta["corenCategory"] = str(step_data["corenCategory"]).strip()
 
+        if step_data.get("organization"):
+            clean_org = str(step_data["organization"]).strip()
+            step_data["organization"] = clean_org
+            meta["registeredOrganization"] = clean_org
+
+        if step_data.get("cacNumber"):
+            step_data["cacNumber"] = str(step_data["cacNumber"]).strip()
+
         meta.update(step_data)
         user.profile_metadata = meta
 
