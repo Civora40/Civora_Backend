@@ -48,3 +48,37 @@ class HealthCheckView(APIView):
             message="Civora Backend is healthy.",
         )
 
+
+class ApiRootIndexView(APIView):
+    """
+    GET / and GET /api/v1/
+    Returns service metadata and discovery links so visiting the root URL in a browser
+    shows a clean JSON status payload instead of a 404.
+    """
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request):
+        base_url = request.build_absolute_uri("/").rstrip("/")
+        return api_success(
+            data={
+                "service": "Civora Centralized Reporting Hub API",
+                "status": "online",
+                "version": "1.0.0",
+                "environment": getattr(settings, "CIVORA_ENV", "development"),
+                "endpoints": {
+                    "health": f"{base_url}/api/v1/health/",
+                    "swagger_docs": f"{base_url}/api/docs/",
+                    "openapi_schema": f"{base_url}/api/schema/",
+                    "auth_login": f"{base_url}/api/v1/auth/login/",
+                    "admin_login": f"{base_url}/api/v1/auth/admin/login/",
+                    "projects": f"{base_url}/api/v1/projects/",
+                    "organizations": f"{base_url}/api/v1/organizations/",
+                    "users_me": f"{base_url}/api/v1/users/me/",
+                },
+            },
+            message="Welcome to the Civora Unified Backend API.",
+        )
+
+

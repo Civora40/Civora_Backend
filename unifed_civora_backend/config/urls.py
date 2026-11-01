@@ -6,9 +6,10 @@ plus OpenAPI 3.1 schema and Swagger UI documentation.
 from django.contrib import admin
 from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
-from common.views import HealthCheckView
+from common.views import ApiRootIndexView, HealthCheckView
 
 api_v1_patterns = [
+    path("", ApiRootIndexView.as_view(), name="api-v1-root"),
     path("health/", HealthCheckView.as_view(), name="api-health"),
     path("auth/", include("apps.authentication.urls")),
     path("users/", include("apps.users.urls")),
@@ -29,6 +30,7 @@ api_v1_patterns = [
 ]
 
 urlpatterns = [
+    path("", ApiRootIndexView.as_view(), name="api-root"),
     path("admin/", admin.site.urls),
     path("api/v1/", include(api_v1_patterns)),
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
