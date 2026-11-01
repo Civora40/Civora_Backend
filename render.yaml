@@ -1,10 +1,4 @@
 # Render Blueprint for Civora Unified Backend
-databases:
-  - name: civora-postgres
-    databaseName: civora_db
-    user: civora_user
-    plan: free
-
 services:
   - type: web
     name: civora-backend-api
@@ -26,9 +20,7 @@ services:
       - key: SECRET_KEY
         generateValue: true
       - key: DATABASE_URL
-        fromDatabase:
-          name: civora-postgres
-          property: connectionString
+        sync: false
       - key: ALLOWED_HOSTS
         value: ".onrender.com,localhost,127.0.0.1"
       - key: CORS_ALLOWED_ORIGINS

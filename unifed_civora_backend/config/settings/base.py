@@ -116,6 +116,11 @@ DATABASES = {
         conn_health_checks=True,
     )
 }
+CSRF_TRUSTED_ORIGINS = get_env(
+    "CSRF_TRUSTED_ORIGINS",
+    default="https://*.onrender.com,http://localhost:3000,http://localhost:3001",
+    cast=Csv(),
+)
 
 # ==============================================================================
 # AUTHENTICATION & PASSWORD VALIDATION
