@@ -24,7 +24,7 @@ services:
       - key: ALLOWED_HOSTS
         value: ".onrender.com,localhost,127.0.0.1"
       - key: CORS_ALLOWED_ORIGINS
-        value: "http://localhost:3000,http://localhost:3001"
+        value: "https://civora-gamma.vercel.app,http://localhost:3000,http://localhost:3001"
       - key: CIVORA_ADMIN_EMAIL
         value: "admin@civora.internal"
       - key: CIVORA_ADMIN_PASSWORD

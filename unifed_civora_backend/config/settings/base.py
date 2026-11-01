@@ -206,9 +206,12 @@ SPECTACULAR_SETTINGS = {
 # 3. Civora_Mobile_App (Expo/Metro ports 8081, 19000, 19006)
 CORS_ALLOWED_ORIGINS = get_env(
     "CORS_ALLOWED_ORIGINS",
-    default="http://localhost:3000,http://localhost:3001,http://localhost:8081,http://127.0.0.1:3000,http://127.0.0.1:3001",
+    default="https://civora-gamma.vercel.app,http://localhost:3000,http://localhost:3001,http://localhost:8081,http://127.0.0.1:3000,http://127.0.0.1:3001",
     cast=Csv(),
 )
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^https://.*\.vercel\.app$",
+]
 CORS_ALLOW_CREDENTIALS = True
 
 # ==============================================================================
