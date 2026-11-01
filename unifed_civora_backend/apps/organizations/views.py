@@ -4,7 +4,9 @@ from datetime import timedelta
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.text import slugify
-from rest_framework import status
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiExample, extend_schema, inline_serializer
+from rest_framework import serializers, status
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
@@ -20,12 +22,59 @@ from .serializers import (
     serialize_organization,
 )
 
+CreateOrganizationRequestSerializer = inline_serializer(
+    name="CreateOrganizationRequest",
+    fields={
+        "name": serializers.CharField(help_text="Organization legal or display name"),
+        "code": serializers.CharField(help_text="Unique short code (e.g. CIV-FMWH-02)"),
+        "tier": serializers.ChoiceField(
+            choices=["government", "enterprise", "contractor"],
+            required=False,
+            default="enterprise",
+        ),
+        "status": serializers.ChoiceField(
+            choices=["active", "suspended", "pending_verification"],
+            required=False,
+            default="active",
+        ),
+        "cacNumber": serializers.CharField(required=False, allow_blank=True),
+        "contactEmail": serializers.EmailField(required=False, allow_blank=True),
+        "contactPhone": serializers.CharField(required=False, allow_blank=True),
+        "officeAddress": serializers.CharField(required=False, allow_blank=True),
+        "notes": serializers.CharField(required=False, allow_blank=True),
+    },
+)
+
+CreateInvitationRequestSerializer = inline_serializer(
+    name="CreateInvitationRequest",
+    fields={
+        "email": serializers.EmailField(help_text="Recipient engineer or stakeholder email"),
+        "role": serializers.CharField(
+            required=False,
+            default="project_engineer",
+            help_text="System role slug (e.g. project_engineer, field_inspector, qa_qc_reviewer)",
+        ),
+        "organizationId": serializers.UUIDField(required=False),
+        "assignedProjects": serializers.ListField(
+            child=serializers.CharField(),
+            required=False,
+            help_text="List of project codes to pre-assign",
+        ),
+    },
+)
+
 
 class OrganizationListView(APIView):
     """GET, POST /api/v1/organizations/"""
 
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        tags=["Organizations & Invitations"],
+        summary="List organizations",
+        description="Lists all organizations for Platform Admins, or the current user's active organizations.",
+        responses={200: OrganizationSerializer(many=True)},
+    )
     def get(self, request):
         if request.user.is_platform_admin:
             orgs = Organization.objects.all()
@@ -34,6 +83,28 @@ class OrganizationListView(APIView):
         serializer = OrganizationSerializer(orgs, many=True)
         return api_success(data=serializer.data)
 
+    @extend_schema(
+        tags=["Organizations & Invitations"],
+        summary="Provision a new organization (Platform Admin)",
+        description="Creates a new tenant organization and records an audit event.",
+        request=CreateOrganizationRequestSerializer,
+        responses={201: OrganizationSerializer},
+        examples=[
+            OpenApiExample(
+                "Provision Organization Example",
+                value={
+                    "name": "Reynolds Construction Company (RCC) Nigeria",
+                    "code": "CIV-RCC-04",
+                    "tier": "contractor",
+                    "cacNumber": "RC-198842",
+                    "contactEmail": "engineering@rcc.ng",
+                    "contactPhone": "+234 809 111 2233",
+                    "officeAddress": "Plot 1408, Mabushi District, Abuja FCT",
+                },
+                request_only=True,
+            )
+        ],
+    )
     def post(self, request):
         if not request.user.is_platform_admin:
             raise PermissionDenied("Only platform administrators can provision new organizations.")
@@ -83,6 +154,11 @@ class OrganizationDetailView(APIView):
 
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        tags=["Organizations & Invitations"],
+        summary="Get organization details by ID",
+        responses={200: OrganizationSerializer},
+    )
     def get(self, request, org_id):
         org = get_object_or_404(Organization, id=org_id)
         if not request.user.is_platform_admin and not org.memberships.filter(
@@ -97,6 +173,12 @@ class MembershipListView(APIView):
 
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        tags=["Organizations & Invitations"],
+        summary="List organization memberships",
+        description="Lists active and inactive organization membership records across tenants (Admin) or for the active organization.",
+        responses={200: serializers.ListSerializer(child=serializers.DictField())},
+    )
     def get(self, request):
         if request.user.is_platform_admin:
             qs = OrganizationMembership.objects.select_related(
@@ -118,6 +200,11 @@ class MembershipRevokeView(APIView):
 
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        tags=["Organizations & Invitations"],
+        summary="Revoke an organization membership",
+        responses={200: OpenApiTypes.OBJECT},
+    )
     def delete(self, request, membership_id):
         membership = get_object_or_404(
             OrganizationMembership.objects.select_related("user", "organization"),
@@ -145,6 +232,11 @@ class InvitationListCreateView(APIView):
 
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        tags=["Organizations & Invitations"],
+        summary="List organization invitations",
+        responses={200: OpenApiTypes.OBJECT},
+    )
     def get(self, request):
         if request.user.is_platform_admin:
             qs = OrganizationInvitation.objects.select_related("organization", "role", "invited_by").all()
@@ -158,6 +250,23 @@ class InvitationListCreateView(APIView):
 
         return api_success(data=[serialize_invitation(inv) for inv in qs])
 
+    @extend_schema(
+        tags=["Organizations & Invitations"],
+        summary="Issue a new organization invitation",
+        request=CreateInvitationRequestSerializer,
+        responses={201: OpenApiTypes.OBJECT},
+        examples=[
+            OpenApiExample(
+                "Invite Field Inspector Example",
+                value={
+                    "email": "inspector.new@civora.ng",
+                    "role": "field_inspector",
+                    "assignedProjects": ["LCR-S1-2026"],
+                },
+                request_only=True,
+            )
+        ],
+    )
     def post(self, request):
         payload = request.data or {}
         email = (payload.get("email") or "").strip().lower()
@@ -214,6 +323,12 @@ class InvitationRevokeView(APIView):
 
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        tags=["Organizations & Invitations"],
+        summary="Revoke a pending organization invitation",
+        request=None,
+        responses={200: OpenApiTypes.OBJECT},
+    )
     def post(self, request, invitation_id):
         inv = get_object_or_404(OrganizationInvitation, id=invitation_id)
         inv.status = "revoked"

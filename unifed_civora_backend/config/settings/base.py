@@ -173,11 +173,28 @@ SPECTACULAR_SETTINGS = {
     "TITLE": "Civora Centralized Reporting Hub API",
     "DESCRIPTION": (
         "Centralized REST API for Civora Mobile App, PE & Stakeholder Frontend, "
-        "and Platform Admin Frontend."
+        "and Platform Admin Frontend. Authenticate via `/api/v1/auth/login/` or "
+        "`/api/v1/auth/admin/login/`, copy the `access` JWT token, and click **Authorize**."
     ),
     "VERSION": "1.0.0",
     "SERVE_INCLUDE_SCHEMA": False,
     "COMPONENT_SPLIT_REQUEST": True,
+    "SWAGGER_UI_SETTINGS": {
+        "deepLinking": True,
+        "persistAuthorization": True,
+        "displayOperationId": False,
+        "docExpansion": "list",
+        "filter": True,
+    },
+    "TAGS": [
+        {"name": "System & Health", "description": "API root index, health check, and database readiness"},
+        {"name": "Authentication", "description": "Login, Dedicated Admin Login, Registration, JWT Refresh, Logout & Password Reset"},
+        {"name": "Users & Onboarding", "description": "User profiles, 10-step COREN/CAC onboarding flow, and admin user status controls"},
+        {"name": "Access Control (RBAC)", "description": "Canonical system roles and explicit permission capabilities"},
+        {"name": "Organizations & Invitations", "description": "Multi-tenant organizations, memberships, and controlled onboarding invitations"},
+        {"name": "Projects", "description": "Project registry, initiation, lifecycle state transitions, and project team assignments"},
+        {"name": "Audit & Governance", "description": "Immutable append-only security and operational audit trail"},
+    ],
 }
 
 # ==============================================================================

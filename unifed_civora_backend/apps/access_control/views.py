@@ -1,4 +1,6 @@
-"""HTTP views for Access Control (RBAC Roles & Permissions) domain."""
+"""HTTP views for Access Control (RBAC Roles & Permissions) domain with Swagger schemas."""
+from drf_spectacular.utils import extend_schema, inline_serializer
+from rest_framework import serializers
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 from common.responses import api_success
@@ -10,6 +12,19 @@ class RoleListView(APIView):
 
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        tags=["Access Control (RBAC)"],
+        summary="List Canonical System Roles & Capabilities",
+        responses={
+            200: inline_serializer(
+                name="RoleListResponse",
+                fields={
+                    "success": serializers.BooleanField(default=True),
+                    "data": serializers.ListField(child=serializers.DictField()),
+                },
+            )
+        },
+    )
     def get(self, request):
         roles = Role.objects.prefetch_related("permissions").all()
         data = [
@@ -31,6 +46,19 @@ class PermissionListView(APIView):
 
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        tags=["Access Control (RBAC)"],
+        summary="List Explicit Permission Capabilities",
+        responses={
+            200: inline_serializer(
+                name="PermissionListResponse",
+                fields={
+                    "success": serializers.BooleanField(default=True),
+                    "data": serializers.ListField(child=serializers.DictField()),
+                },
+            )
+        },
+    )
     def get(self, request):
         perms = Permission.objects.all()
         data = [
@@ -44,4 +72,3 @@ class PermissionListView(APIView):
             for p in perms
         ]
         return api_success(data=data)
-

@@ -1,7 +1,8 @@
 """HTTP views for Projects domain (Phase 4 / Task 002)."""
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.shortcuts import get_object_or_404
-from rest_framework import status
+from drf_spectacular.utils import OpenApiExample, extend_schema, inline_serializer
+from rest_framework import serializers, status
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.views import APIView
 from apps.access_control.models import Role, SystemRoleSlug
@@ -13,6 +14,58 @@ from .selectors import get_authorized_projects_for_user, get_project_members
 from .serializers import ProjectMembershipSerializer, ProjectSerializer, serialize_project
 from .services import assign_user_to_project, transition_project_status
 
+CreateProjectRequestSerializer = inline_serializer(
+    name="CreateProjectRequest",
+    fields={
+        "name": serializers.CharField(help_text="Project name"),
+        "code": serializers.CharField(help_text="Unique project code (e.g. LCR-S3-2026)"),
+        "client": serializers.CharField(help_text="Sponsoring ministry, agency, or client organization"),
+        "location": serializers.CharField(required=False, allow_blank=True),
+        "description": serializers.CharField(required=False, allow_blank=True),
+        "status": serializers.ChoiceField(choices=["active", "planning", "setup"], required=False, default="active"),
+        "leadEngineer": serializers.CharField(required=False, allow_blank=True),
+        "lasbcaPermitNumber": serializers.CharField(required=False, allow_blank=True),
+        "budgetAmount": serializers.CharField(required=False, allow_blank=True),
+        "currency": serializers.CharField(required=False, default="₦"),
+        "specsReference": serializers.CharField(required=False, allow_blank=True),
+        "projectType": serializers.CharField(required=False, allow_blank=True),
+        "contractRef": serializers.CharField(required=False, allow_blank=True),
+        "priority": serializers.ChoiceField(
+            choices=["low", "normal", "high", "critical"], required=False, default="normal"
+        ),
+        "country": serializers.CharField(required=False, default="Nigeria"),
+        "state": serializers.CharField(required=False, allow_blank=True),
+        "city": serializers.CharField(required=False, allow_blank=True),
+        "siteAddress": serializers.CharField(required=False, allow_blank=True),
+        "coordinates": serializers.CharField(required=False, allow_blank=True),
+        "startDate": serializers.CharField(required=False, allow_blank=True),
+        "completionDate": serializers.CharField(required=False, allow_blank=True),
+        "scopeSummary": serializers.CharField(required=False, allow_blank=True),
+        "deliverables": serializers.ListField(child=serializers.CharField(), required=False),
+        "milestonesList": serializers.ListField(child=serializers.DictField(), required=False),
+        "contractor": serializers.CharField(required=False, allow_blank=True),
+        "clientRep": serializers.CharField(required=False, allow_blank=True),
+        "reportingCadence": serializers.CharField(required=False, default="daily"),
+        "submissionChannels": serializers.ListField(child=serializers.CharField(), required=False),
+    },
+)
+
+UpdateProjectRequestSerializer = inline_serializer(
+    name="UpdateProjectRequest",
+    fields={
+        "name": serializers.CharField(required=False),
+        "location": serializers.CharField(required=False),
+        "description": serializers.CharField(required=False),
+        "client_name": serializers.CharField(required=False),
+        "lead_engineer_name": serializers.CharField(required=False),
+        "budget_formatted": serializers.CharField(required=False),
+        "status": serializers.ChoiceField(
+            choices=["setup", "active", "on_hold", "completed", "archived"],
+            required=False,
+        ),
+    },
+)
+
 
 class ProjectListView(APIView):
     """
@@ -22,6 +75,12 @@ class ProjectListView(APIView):
 
     permission_classes = [IsTenantMember]
 
+    @extend_schema(
+        tags=["Projects"],
+        summary="List authorized infrastructure projects",
+        description="Returns all projects for Platform Admins or tenant projects assigned to the authenticated user.",
+        responses={200: ProjectSerializer(many=True)},
+    )
     def get(self, request):
         # If platform admin requests all projects without explicit X-Organization-ID filter
         if request.user.is_platform_admin and not request.headers.get("X-Organization-ID"):
@@ -40,6 +99,35 @@ class ProjectListView(APIView):
         serializer = ProjectSerializer(projects, many=True)
         return api_success(data=serializer.data)
 
+    @extend_schema(
+        tags=["Projects"],
+        summary="Create a new infrastructure project",
+        description="Creates a new project under the active tenant organization, assigns the creator, and logs an audit event.",
+        request=CreateProjectRequestSerializer,
+        responses={201: ProjectSerializer},
+        examples=[
+            OpenApiExample(
+                "Create Highway Project Example",
+                value={
+                    "name": "Lagos-Calabar Coastal Highway — Section 2",
+                    "code": "LCR-S2-2026",
+                    "client": "Federal Ministry of Works & Housing (FMWH)",
+                    "location": "Lekki Free Trade Zone, Lagos",
+                    "description": "10-lane rigid concrete pavement highway corridor with service ducts.",
+                    "status": "active",
+                    "leadEngineer": "Engr. Tunde Bakare, COREN",
+                    "lasbcaPermitNumber": "LASBCA/2026/HWY/0142",
+                    "budgetAmount": "420B",
+                    "currency": "₦",
+                    "projectType": "Road / Highway",
+                    "priority": "critical",
+                    "state": "Lagos",
+                    "city": "Ibeju-Lekki",
+                },
+                request_only=True,
+            )
+        ],
+    )
     def post(self, request):
         # Verify permission: platform_admin or organization member with projects.create / projects.update
         org = request.organization
@@ -162,6 +250,11 @@ class ProjectDetailView(APIView):
 
     permission_classes = [IsTenantMember]
 
+    @extend_schema(
+        tags=["Projects"],
+        summary="Get project details by ID",
+        responses={200: ProjectSerializer},
+    )
     def get(self, request, project_id):
         qs = get_authorized_projects_for_user(
             user=request.user,
@@ -170,6 +263,12 @@ class ProjectDetailView(APIView):
         project = get_object_or_404(qs, id=project_id)
         return api_success(data=serialize_project(project))
 
+    @extend_schema(
+        tags=["Projects"],
+        summary="Update project attributes or transition status",
+        request=UpdateProjectRequestSerializer,
+        responses={200: ProjectSerializer},
+    )
     def patch(self, request, project_id):
         qs = get_authorized_projects_for_user(
             user=request.user,
@@ -206,6 +305,11 @@ class ProjectMemberListView(APIView):
 
     permission_classes = [IsTenantMember]
 
+    @extend_schema(
+        tags=["Projects"],
+        summary="List project members",
+        responses={200: ProjectMembershipSerializer(many=True)},
+    )
     def get(self, request, project_id):
         members = get_project_members(
             organization_id=request.organization.id,

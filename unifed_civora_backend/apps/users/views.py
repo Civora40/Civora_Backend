@@ -1,10 +1,10 @@
-"""HTTP views for Users domain (Phase 3 / Task 002)."""
+"""HTTP views for Users domain (Phase 3 / Task 002) with Swagger/OpenAPI schemas."""
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-from rest_framework import status
+from drf_spectacular.utils import OpenApiExample, extend_schema, inline_serializer
+from rest_framework import serializers
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
-from apps.access_control.permissions import HasOrganizationCapability, IsTenantMember
 from apps.audit.services import record_audit_event
 from common.responses import api_success
 from .models import User
@@ -15,10 +15,35 @@ class CurrentUserProfileView(APIView):
     """GET, PATCH /api/v1/users/me/"""
 
     permission_classes = [IsAuthenticated]
+    serializer_class = UserProfileSerializer
 
+    @extend_schema(
+        tags=["Users & Onboarding"],
+        summary="Get Current Authenticated User Profile (`/users/me/`)",
+        responses={200: UserProfileSerializer},
+    )
     def get(self, request):
         return api_success(data=serialize_civora_user(request.user))
 
+    @extend_schema(
+        tags=["Users & Onboarding"],
+        summary="Update Current User Profile",
+        request=inline_serializer(
+            name="UserProfileUpdateRequest",
+            fields={
+                "firstName": serializers.CharField(required=False),
+                "lastName": serializers.CharField(required=False),
+                "displayName": serializers.CharField(required=False),
+                "jobTitle": serializers.CharField(required=False),
+                "department": serializers.CharField(required=False),
+                "phone": serializers.CharField(required=False),
+                "timeZone": serializers.CharField(required=False),
+                "corenNumber": serializers.CharField(required=False),
+                "corenStatus": serializers.CharField(required=False),
+            },
+        ),
+        responses={200: UserProfileSerializer},
+    )
     def patch(self, request):
         user: User = request.user
         payload = request.data or {}
@@ -63,6 +88,19 @@ class UserOnboardingView(APIView):
 
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        tags=["Users & Onboarding"],
+        summary="Get 10-Step Onboarding State",
+        responses={
+            200: inline_serializer(
+                name="OnboardingStateResponse",
+                fields={
+                    "success": serializers.BooleanField(default=True),
+                    "data": serializers.DictField(),
+                },
+            )
+        },
+    )
     def get(self, request):
         user: User = request.user
         completed = bool(user.onboarding_completed_at)
@@ -75,6 +113,38 @@ class UserOnboardingView(APIView):
             }
         )
 
+    @extend_schema(
+        tags=["Users & Onboarding"],
+        summary="Advance or Complete 10-Step Onboarding Flow",
+        request=inline_serializer(
+            name="OnboardingStepRequest",
+            fields={
+                "step": serializers.IntegerField(min_value=1, max_value=10),
+                "action": serializers.CharField(required=False, help_text="'complete' on final step 10"),
+                "data": serializers.DictField(required=False),
+            },
+        ),
+        responses={
+            200: inline_serializer(
+                name="OnboardingAdvanceResponse",
+                fields={
+                    "success": serializers.BooleanField(default=True),
+                    "data": serializers.DictField(),
+                },
+            )
+        },
+        examples=[
+            OpenApiExample(
+                "Complete Onboarding (Step 10)",
+                value={
+                    "step": 10,
+                    "action": "complete",
+                    "data": {"corenNumber": "R.55120", "corenStatus": "verified"},
+                },
+                request_only=True,
+            ),
+        ],
+    )
     def post(self, request):
         user: User = request.user
         body = request.data or {}
@@ -86,7 +156,6 @@ class UserOnboardingView(APIView):
         meta.update(step_data)
         user.profile_metadata = meta
 
-        # Update top-level fields if present in step_data
         if step_data.get("firstName"):
             user.first_name = step_data["firstName"]
         if step_data.get("lastName"):
@@ -149,7 +218,13 @@ class UserListView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    serializer_class = UserProfileSerializer
 
+    @extend_schema(
+        tags=["Users & Onboarding"],
+        summary="List Platform or Tenant Users",
+        responses={200: UserProfileSerializer(many=True)},
+    )
     def get(self, request):
         if request.user.is_platform_admin:
             qs = User.objects.prefetch_related(
@@ -174,7 +249,14 @@ class UserToggleStatusView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    serializer_class = UserProfileSerializer
 
+    @extend_schema(
+        tags=["Users & Onboarding"],
+        summary="Suspend or Reactivate User Account (Admin Only)",
+        request=None,
+        responses={200: UserProfileSerializer},
+    )
     def post(self, request, user_id):
         if not request.user.is_platform_admin:
             from rest_framework.exceptions import PermissionDenied

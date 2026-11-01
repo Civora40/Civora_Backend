@@ -1,4 +1,5 @@
 """HTTP views for Audit domain (Phase 3 & 4 / Task 002)."""
+from drf_spectacular.utils import extend_schema
 from rest_framework import serializers
 from rest_framework.views import APIView
 from apps.access_control.permissions import HasOrganizationCapability, IsTenantMember
@@ -93,6 +94,12 @@ class AuditLogListView(APIView):
     permission_classes = [IsTenantMember, HasOrganizationCapability]
     required_permission = "audit.view"
 
+    @extend_schema(
+        tags=["Audit & Governance"],
+        summary="List immutable audit log entries",
+        description="Returns the latest 100 audit trail records across tenants (Platform Admin) or for the active organization.",
+        responses={200: AuditLogSerializer(many=True)},
+    )
     def get(self, request):
         if request.user.is_platform_admin and not request.headers.get("X-Organization-ID"):
             logs = AuditLog.objects.select_related("actor", "organization", "project").all()[:100]
