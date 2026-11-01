@@ -103,17 +103,17 @@ def serialize_civora_user(user: User) -> dict:
         "name": user.full_name,
         "firstName": first_name,
         "lastName": last_name,
-        "displayName": user.display_name or user.full_name,
+        "displayName": user.display_name or "",
         "role": role_slug,
         "title": user.job_title or ("Platform Administrator" if role_slug == "platform_admin" else "Project Engineer"),
-        "jobTitle": user.job_title,
+        "jobTitle": user.job_title or "",
         "organization": org_name,
         "organizationId": org_id,
         "phone": user.phone_number or raw_phone_display or "",
-        "timeZone": user.time_zone or "Africa/Lagos",
+        "timeZone": user.time_zone or "",
         "corenNumber": user.professional_registration or "",
         "corenStatus": canonical_coren_status,
-        "corenCategory": coren_category or "Registered Engineer (COREN Reg.)",
+        "corenCategory": coren_category or "",
         "cacNumber": (
             active_org_membership.organization.cac_number
             if active_org_membership and active_org_membership.organization and active_org_membership.organization.cac_number

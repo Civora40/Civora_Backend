@@ -177,13 +177,13 @@ def register_user_account(
         org_title = (organization_name or "Civora Infrastructure Ltd").strip()
         target_org = Organization.objects.filter(name__iexact=org_title).first()
         if not target_org:
-            target_org = Organization.objects.filter(is_active=True).first()
-        if not target_org:
             base_slug = slugify(org_title)[:80] or "civora-org"
+            unique_suffix = int(timezone.now().timestamp() * 1000) % 1000000
             target_org = Organization.objects.create(
                 name=org_title,
-                slug=f"{base_slug}-{int(timezone.now().timestamp())}",
-                code=f"ORG-{int(timezone.now().timestamp()) % 100000}",
+                slug=f"{base_slug}-{unique_suffix}",
+                code=f"ORG-{unique_suffix}",
+                cac_number="",
                 country="Nigeria",
             )
 
@@ -198,12 +198,9 @@ def register_user_account(
         full_name=computed_full_name,
         first_name=first_name,
         last_name=last_name,
-        display_name=computed_full_name,
-        job_title=job_title or (
-            "Stakeholder Representative"
-            if assigned_role_slug == SystemRoleSlug.READ_ONLY_STAKEHOLDER
-            else "Project Engineer"
-        ),
+        display_name="",
+        job_title=job_title or "",
+        time_zone="",
         is_email_verified=bool(invitation),
         is_platform_admin=False,
         onboarding_step=1,
