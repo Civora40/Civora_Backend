@@ -243,9 +243,15 @@ def register_user_account(
     refresh = RefreshToken.for_user(user)
     user_payload = serialize_civora_user(user)
 
+    next_url = (
+        "/stakeholder/onboarding"
+        if assigned_role_slug == SystemRoleSlug.READ_ONLY_STAKEHOLDER
+        else "/onboarding"
+    )
+
     return {
         "access": str(refresh.access_token),
         "refresh": str(refresh),
         "user": user_payload,
-        "nextUrl": "/onboarding",
+        "nextUrl": next_url,
     }

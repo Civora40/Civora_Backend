@@ -61,9 +61,22 @@ def serialize_civora_user(user: User) -> dict:
         else None
     )
 
-    meta = user.profile_metadata or {}
+    meta = dict(user.profile_metadata or {})
+    # Prevent raw metadata keys from clobbering canonical status fields
+    coren_category = meta.pop("corenCategory", None)
+    raw_meta_coren_status = meta.pop("corenStatus", None)
+    if not coren_category and raw_meta_coren_status and raw_meta_coren_status not in ("verified", "pending", "unregistered"):
+        coren_category = raw_meta_coren_status
+    raw_phone_display = meta.pop("phone", None)
+
+    canonical_coren_status = (
+        user.coren_status
+        if user.coren_status in ("verified", "pending", "unregistered")
+        else ("verified" if user.professional_registration else "unregistered")
+    )
 
     return {
+        **meta,
         # Backend canonical snake_case fields
         "id": str(user.id),
         "email": user.email,
@@ -74,7 +87,7 @@ def serialize_civora_user(user: User) -> dict:
         "job_title": user.job_title,
         "department": user.department,
         "professional_registration": user.professional_registration,
-        "coren_status": user.coren_status,
+        "coren_status": canonical_coren_status,
         "phone_number": user.phone_number,
         "time_zone": user.time_zone,
         "account_status": user.account_status if user.is_active else "suspended",
@@ -96,13 +109,14 @@ def serialize_civora_user(user: User) -> dict:
         "jobTitle": user.job_title,
         "organization": org_name,
         "organizationId": org_id,
-        "phone": user.phone_number or "",
+        "phone": user.phone_number or raw_phone_display or "",
         "timeZone": user.time_zone or "Africa/Lagos",
         "corenNumber": user.professional_registration or "",
-        "corenStatus": user.coren_status or "unregistered",
+        "corenStatus": canonical_coren_status,
+        "corenCategory": coren_category or "Registered Engineer (COREN Reg.)",
         "cacNumber": (
             active_org_membership.organization.cac_number
-            if active_org_membership and active_org_membership.organization
+            if active_org_membership and active_org_membership.organization and active_org_membership.organization.cac_number
             else meta.get("cacNumber", "")
         ),
         "accountStatus": user.account_status if user.is_active else "suspended",
@@ -112,7 +126,6 @@ def serialize_civora_user(user: User) -> dict:
         "onboardingCompletedAt": onboarding_ms,
         "lastLoginAt": user.last_login.isoformat() if user.last_login else None,
         "createdAt": user.created_at.isoformat() if user.created_at else None,
-        **meta,
     }
 
 

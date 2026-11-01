@@ -51,7 +51,7 @@ class User(AbstractBaseUser, PermissionsMixin, TimestampedModel):
         help_text="Engineering registration reference (e.g., COREN #CR-89412).",
     )
     coren_status = models.CharField(
-        max_length=32,
+        max_length=120,
         default="unregistered",
         help_text="verified | pending | unregistered",
     )

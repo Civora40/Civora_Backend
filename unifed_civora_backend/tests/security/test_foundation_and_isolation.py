@@ -324,4 +324,93 @@ class FoundationAndTenantIsolationTests(TestCase):
         self.assertEqual(proj_res.data["data"]["code"], "TMB-REHAB-01")
         self.assertEqual(proj_res.data["data"]["client"], "Federal Ministry of Works")
 
+    def test_full_10_step_engineer_and_stakeholder_onboarding_flows(self):
+        # 1. Engineer full 10-step progression with long COREN category & CAC persistence
+        self.client.force_authenticate(user=self.pe_alpha)
+        step1_res = self.client.post(
+            reverse("users-onboarding"),
+            data={
+                "step": 1,
+                "data": {
+                    "firstName": "Adebayo",
+                    "lastName": "Ogunlesi",
+                    "displayName": "Engr. Adebayo Ogunlesi, FNSE",
+                    "corenStatus": "Registered Quantity Surveyor (QSRBN/NIQS)",
+                    "corenNumber": "COREN/R.77123",
+                    "phone": "+234 803 456 7890",
+                },
+            },
+            format="json",
+        )
+        self.assertEqual(step1_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(step1_res.data["data"]["nextStep"], 2)
+        self.assertEqual(step1_res.data["data"]["user"]["corenStatus"], "verified")
+        self.assertEqual(
+            step1_res.data["data"]["user"]["corenCategory"],
+            "Registered Quantity Surveyor (QSRBN/NIQS)",
+        )
+
+        step2_res = self.client.post(
+            reverse("users-onboarding"),
+            data={
+                "step": 2,
+                "data": {
+                    "organization": "Tenant Alpha Construction",
+                    "cacNumber": "RC-998877",
+                    "officeState": "Lagos State (South West)",
+                    "contractorTier": "Tier 1 Major National EPC",
+                },
+            },
+            format="json",
+        )
+        self.assertEqual(step2_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(step2_res.data["data"]["nextStep"], 3)
+        self.assertEqual(step2_res.data["data"]["user"]["cacNumber"], "RC-998877")
+
+        # 2. Stakeholder registration & 5-step onboarding completion
+        stk_reg = self.client.post(
+            reverse("auth-register"),
+            data={
+                "firstName": "Elena",
+                "lastName": "Rostova",
+                "email": "elena.rostova@oversight.gov.ng",
+                "password": "Pass12",  # 6-char password matching frontend validation
+                "organization": "Tenant Alpha Construction",
+                "jobTitle": "Oversight Director",
+                "role": "read_only_stakeholder",
+                "accountType": "stakeholder",
+            },
+            format="json",
+        )
+        self.assertEqual(stk_reg.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(stk_reg.data["data"]["nextUrl"], "/stakeholder/onboarding")
+        stk_token = stk_reg.data["data"]["access"]
+
+        self.client.force_authenticate(user=None)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {stk_token}")
+        stk_complete = self.client.post(
+            reverse("users-onboarding"),
+            data={
+                "step": 10,
+                "action": "complete",
+                "data": {
+                    "fullName": "Elena Rostova, MBE",
+                    "organization": "Federal Ministry of Works",
+                    "jobTitle": "Ministerial Observer",
+                    "phone": "+234 803 456 7890",  # Same default phone must not fail unique constraint
+                    "timeZone": "Europe/London (GMT+0 / UTC+1)",
+                    "notificationPreferences": {
+                        "notifyReleasedReports": True,
+                        "notifyMilestones": True,
+                    },
+                },
+            },
+            format="json",
+        )
+        self.assertEqual(stk_complete.status_code, status.HTTP_200_OK)
+        self.assertTrue(stk_complete.data["data"]["completed"])
+        self.assertEqual(stk_complete.data["data"]["redirectUrl"], "/stakeholder")
+        self.assertEqual(stk_complete.data["data"]["user"]["name"], "Elena Rostova, MBE")
+
+
 

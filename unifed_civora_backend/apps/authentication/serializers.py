@@ -13,7 +13,7 @@ class RegisterRequestSerializer(serializers.Serializer):
     lastName = serializers.CharField(max_length=120, required=False, allow_blank=True)
     full_name = serializers.CharField(max_length=255, required=False, allow_blank=True)
     email = serializers.EmailField()
-    password = serializers.CharField(write_only=True, min_length=8)
+    password = serializers.CharField(write_only=True, min_length=6)
     organization = serializers.CharField(max_length=255, required=False, allow_blank=True)
     jobTitle = serializers.CharField(max_length=150, required=False, allow_blank=True)
     invitationCode = serializers.CharField(max_length=64, required=False, allow_blank=True)

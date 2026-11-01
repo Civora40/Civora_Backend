@@ -62,19 +62,32 @@ class CurrentUserProfileView(APIView):
         if "department" in payload:
             user.department = payload.get("department") or user.department
         if "phone" in payload or "phone_number" in payload:
-            raw_phone = (payload.get("phone") or payload.get("phone_number") or "").strip().replace(" ", "")
-            if raw_phone:
-                user.phone_number = raw_phone
-        if "timeZone" in payload or "time_zone" in payload:
-            user.time_zone = payload.get("timeZone") or payload.get("time_zone") or user.time_zone
+            raw_phone_input = (payload.get("phone") or payload.get("phone_number") or "").strip()
+            cleaned_phone = raw_phone_input.replace(" ", "").replace("-", "")
+            meta = dict(user.profile_metadata or {})
+            if raw_phone_input:
+                meta["phone"] = raw_phone_input
+                user.profile_metadata = meta
+            if cleaned_phone.startswith("+") and 8 <= len(cleaned_phone) <= 20:
+                if not User.objects.filter(phone_number=cleaned_phone).exclude(id=user.id).exists():
+                    user.phone_number = cleaned_phone
+        if "timeZone" in payload or "time_zone" in payload or "timezone" in payload:
+            tz_val = payload.get("timeZone") or payload.get("time_zone") or payload.get("timezone")
+            if tz_val:
+                user.time_zone = str(tz_val)[:64]
         if "corenNumber" in payload or "professional_registration" in payload:
-            user.professional_registration = (
-                payload.get("corenNumber")
-                or payload.get("professional_registration")
-                or user.professional_registration
-            )
+            reg_val = payload.get("corenNumber") or payload.get("professional_registration")
+            if reg_val:
+                user.professional_registration = str(reg_val).strip()[:120]
         if "corenStatus" in payload or "coren_status" in payload:
-            user.coren_status = payload.get("corenStatus") or payload.get("coren_status") or user.coren_status
+            status_val = str(payload.get("corenStatus") or payload.get("coren_status") or "").strip()
+            if status_val in ("verified", "pending", "unregistered"):
+                user.coren_status = status_val
+            elif status_val:
+                meta = dict(user.profile_metadata or {})
+                meta["corenCategory"] = status_val
+                user.profile_metadata = meta
+                user.coren_status = "verified" if user.professional_registration else "pending"
 
         user.save()
         return api_success(data=serialize_civora_user(user), message="Profile updated.")
@@ -150,30 +163,79 @@ class UserOnboardingView(APIView):
         body = request.data or {}
         step = body.get("step")
         action = body.get("action")
-        step_data = body.get("data") or {}
+        step_data = dict(body.get("data") or {})
 
         meta = dict(user.profile_metadata or {})
+
+        # Handle COREN category vs canonical coren_status ('verified' | 'pending' | 'unregistered')
+        raw_coren_status = step_data.pop("corenStatus", None)
+        if raw_coren_status:
+            if raw_coren_status in ("verified", "pending", "unregistered"):
+                user.coren_status = raw_coren_status
+            else:
+                meta["corenCategory"] = str(raw_coren_status).strip()
+                user.coren_status = "verified" if (step_data.get("corenNumber") or user.professional_registration) else "pending"
+
+        if step_data.get("corenCategory"):
+            meta["corenCategory"] = str(step_data["corenCategory"]).strip()
+
         meta.update(step_data)
         user.profile_metadata = meta
 
+        # Identity fields (supports both firstName/lastName and fullName/name from StakeholderOnboarding)
         if step_data.get("firstName"):
-            user.first_name = step_data["firstName"]
+            user.first_name = str(step_data["firstName"]).strip()[:120]
         if step_data.get("lastName"):
-            user.last_name = step_data["lastName"]
-        if user.first_name or user.last_name:
-            user.full_name = f"{user.first_name} {user.last_name}".strip()
+            user.last_name = str(step_data["lastName"]).strip()[:120]
+
+        if step_data.get("firstName") or step_data.get("lastName"):
+            user.full_name = f"{user.first_name} {user.last_name}".strip()[:255]
+        elif step_data.get("fullName") or step_data.get("name"):
+            full_str = str(step_data.get("fullName") or step_data.get("name")).strip()
+            if full_str:
+                user.full_name = full_str[:255]
+                parts = full_str.split(" ", 1)
+                user.first_name = parts[0][:120]
+                user.last_name = (parts[1] if len(parts) > 1 else "")[:120]
+
         if step_data.get("displayName"):
-            user.display_name = step_data["displayName"]
-        if step_data.get("jobTitle"):
-            user.job_title = step_data["jobTitle"]
+            user.display_name = str(step_data["displayName"]).strip()[:255]
+        elif not user.display_name and user.full_name:
+            user.display_name = user.full_name
+
+        if step_data.get("jobTitle") or step_data.get("title"):
+            user.job_title = str(step_data.get("jobTitle") or step_data.get("title")).strip()[:150]
+        elif step_data.get("primaryResponsibility"):
+            user.job_title = str(step_data["primaryResponsibility"]).strip()[:150]
+
         if step_data.get("department"):
-            user.department = step_data["department"]
-        if step_data.get("timeZone"):
-            user.time_zone = step_data["timeZone"]
+            user.department = str(step_data["department"]).strip()[:150]
+
+        if step_data.get("timeZone") or step_data.get("timezone"):
+            user.time_zone = str(step_data.get("timeZone") or step_data.get("timezone")).strip()[:64]
+
+        if step_data.get("phone"):
+            raw_phone_input = str(step_data["phone"]).strip()
+            cleaned_phone = raw_phone_input.replace(" ", "").replace("-", "")
+            if cleaned_phone.startswith("+") and 8 <= len(cleaned_phone) <= 20:
+                if not User.objects.filter(phone_number=cleaned_phone).exclude(id=user.id).exists():
+                    user.phone_number = cleaned_phone
+
         if step_data.get("corenNumber"):
-            user.professional_registration = step_data["corenNumber"]
-        if step_data.get("corenStatus"):
-            user.coren_status = step_data["corenStatus"]
+            user.professional_registration = str(step_data["corenNumber"]).strip()[:120]
+            if user.coren_status == "unregistered":
+                user.coren_status = "verified"
+
+        # Persist CAC number onto user's active organization if blank
+        if step_data.get("cacNumber"):
+            active_membership = (
+                user.organization_memberships.select_related("organization")
+                .filter(is_active=True)
+                .first()
+            )
+            if active_membership and active_membership.organization and not active_membership.organization.cac_number:
+                active_membership.organization.cac_number = str(step_data["cacNumber"]).strip()[:64]
+                active_membership.organization.save(update_fields=["cac_number", "updated_at"])
 
         if action == "complete" or step == 10:
             user.onboarding_completed_at = timezone.now()
@@ -182,7 +244,7 @@ class UserOnboardingView(APIView):
             user.save()
             user_payload = serialize_civora_user(user)
             target_dashboard = (
-                "/dashboard/stakeholder"
+                "/stakeholder"
                 if user_payload.get("role") == "read_only_stakeholder"
                 else "/dashboard"
             )
@@ -191,6 +253,11 @@ class UserOnboardingView(APIView):
                 target_type="User",
                 target_id=str(user.id),
                 actor=user,
+                metadata={
+                    "role": user_payload.get("role"),
+                    "coren_number": user.professional_registration,
+                    "organization": user_payload.get("organization"),
+                },
             )
             return api_success(
                 data={
