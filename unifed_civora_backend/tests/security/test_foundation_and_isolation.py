@@ -241,13 +241,16 @@ class FoundationAndTenantIsolationTests(TestCase):
             entry.delete()
 
     def test_seed_dev_command_is_idempotent(self):
+        call_command("seed_dev", demo=True)
         call_command("seed_dev")
         org_count_first = Organization.objects.count()
         role_count_first = Role.objects.count()
-        # Running seed_dev a second time should not duplicate records
+        # Running seed_dev a second time should not duplicate records and keeps real tenant data intact
         call_command("seed_dev")
         self.assertEqual(Organization.objects.count(), org_count_first)
         self.assertEqual(Role.objects.count(), role_count_first)
+        self.assertTrue(Organization.objects.filter(code="ALPHA").exists())
+        self.assertFalse(Organization.objects.filter(code__in=["JBN-NG", "ACCE-NG"]).exists())
 
     def test_dedicated_admin_login_and_privilege_guard(self):
         call_command("seed_dev")

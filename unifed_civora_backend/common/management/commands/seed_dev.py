@@ -20,20 +20,28 @@ from apps.users.models import User
 
 
 class Command(BaseCommand):
-    help = "Idempotently seed canonical RBAC roles, permissions, organizations, users, invitations, and projects for development."
+    help = "Idempotently seed canonical RBAC roles, permissions, and dedicated Platform Admin while purging demo seed data."
+
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "--demo",
+            action="store_true",
+            help="Optionally seed demo tenants, projects, and sample users for local sandbox evaluation.",
+        )
 
     @transaction.atomic
     def handle(self, *args, **options):
+        seed_demo = bool(options.get("demo"))
         self.stdout.write("Seeding canonical Civora RBAC roles and permissions...")
         roles = seed_canonical_roles_and_permissions()
 
-        # 1. Primary Tenant Organization: Civora Core Infrastructure
+        # 1. Primary Platform Governance Organization (for Dedicated Platform Admin only)
         org_primary, _ = create_or_update_org(
             name="Civora Core Infrastructure",
             slug="civora-core-infrastructure",
             code="CIV-HQ",
             tier="enterprise",
-            cac_number="RC-1928374",
+            cac_number="",
             contact_email="security@civora.internal",
             contact_phone="+234 1 888 2486",
             office_address="Civora House, Victoria Island Technology Corridor, Lagos",
@@ -41,38 +49,10 @@ class Command(BaseCommand):
             country="Nigeria",
         )
 
-        # 2. Tier-1 Engineering Contractor Tenant: Julius Berger Nigeria Plc
-        org_jbn, _ = create_or_update_org(
-            name="Julius Berger Nigeria Plc",
-            slug="julius-berger-nigeria",
-            code="JBN-NG",
-            tier="enterprise",
-            cac_number="RC-11234",
-            contact_email="site.control@juliusberger.com",
-            contact_phone="+234 1 270 3000",
-            office_address="10 Shettima A. Munguno Crescent, Utako, Abuja",
-            notes="Tier 1 Engineering Contractor on Marine & Rail infrastructure.",
-            country="Nigeria",
-        )
-
-        # 3. Secondary Tenant Organization (for tenant isolation verification)
-        org_secondary, _ = create_or_update_org(
-            name="Apex Coastal Civil Engineering Ltd",
-            slug="apex-coastal-civil",
-            code="ACCE-NG",
-            tier="contractor",
-            cac_number="RC-45190",
-            contact_email="operations@apexcivil.com",
-            contact_phone="+234 1 632 8900",
-            office_address="Plot 12, Commercial Block, Victoria Island Extension, Lagos",
-            notes="Highway and coastal revetment specialist contractor.",
-            country="Nigeria",
-        )
-
-        # 4. Seed Dedicated Platform Admin (from CIVORA_ADMIN_EMAIL / CIVORA_ADMIN_PASSWORD)
+        # 2. Seed Dedicated Platform Admin (from CIVORA_ADMIN_EMAIL / CIVORA_ADMIN_PASSWORD)
         dedicated_admin_email = getattr(settings, "CIVORA_ADMIN_EMAIL", "admin@civora.internal").strip().lower()
         dedicated_admin_password = getattr(settings, "CIVORA_ADMIN_PASSWORD", "Civora2026!")
-        dedicated_admin_name = getattr(settings, "CIVORA_ADMIN_NAME", "Engr. Babatunde Fashola-Smith")
+        dedicated_admin_name = getattr(settings, "CIVORA_ADMIN_NAME", "Civora Platform Administrator")
 
         admin_user = upsert_user(
             email=dedicated_admin_email,
@@ -86,6 +66,74 @@ class Command(BaseCommand):
             is_platform_admin=True,
             is_staff=True,
             is_superuser=True,
+        )
+
+        add_user_to_organization(
+            organization=org_primary,
+            user=admin_user,
+            role=roles[SystemRoleSlug.PLATFORM_ADMIN],
+        )
+
+        # 3. Ensure all real (non-seeded) registered user accounts are linked to their own registered organization
+        from apps.users.serializers import is_seeded_demo_user, sync_user_registered_organization
+
+        for real_user in User.objects.all():
+            if not is_seeded_demo_user(real_user):
+                sync_user_registered_organization(real_user)
+
+        if not seed_demo:
+            # Production Mode: Purge any previously seeded demo invitations, projects, users, and organizations
+            OrganizationInvitation.objects.filter(invitation_code="CIV-INV-7841").delete()
+            Project.objects.filter(code__in=["LAMATA-BL2", "EKO-REVET", "ACC-PRJ-99"]).delete()
+
+            demo_emails = [
+                "engineer@civora.internal",
+                "marcus.vance@civora.io",
+                "elena.rostova@civora.io",
+                "stakeholder@civora.internal",
+                "engineer@apexcivil.com",
+                "babatunde.fashola@civora.internal",
+                "amina.bello@civora.internal",
+                "admin@civora.io",
+            ]
+            User.objects.filter(
+                email__in=[e for e in demo_emails if e != dedicated_admin_email]
+            ).delete()
+
+            Organization.objects.filter(code__in=["JBN-NG", "ACCE-NG"]).delete()
+
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"Successfully seeded production RBAC & Dedicated Admin ({dedicated_admin_email}) and purged demo seed records."
+                )
+            )
+            return
+
+        # Optional --demo mode below for local development only
+        org_jbn, _ = create_or_update_org(
+            name="Julius Berger Nigeria Plc",
+            slug="julius-berger-nigeria",
+            code="JBN-NG",
+            tier="enterprise",
+            cac_number="RC-11234",
+            contact_email="site.control@juliusberger.com",
+            contact_phone="+234 1 270 3000",
+            office_address="10 Shettima A. Munguno Crescent, Utako, Abuja",
+            notes="Tier 1 Engineering Contractor on Marine & Rail infrastructure.",
+            country="Nigeria",
+        )
+
+        org_secondary, _ = create_or_update_org(
+            name="Apex Coastal Civil Engineering Ltd",
+            slug="apex-coastal-civil",
+            code="ACCE-NG",
+            tier="contractor",
+            cac_number="RC-45190",
+            contact_email="operations@apexcivil.com",
+            contact_phone="+234 1 632 8900",
+            office_address="Plot 12, Commercial Block, Victoria Island Extension, Lagos",
+            notes="Highway and coastal revetment specialist contractor.",
+            country="Nigeria",
         )
 
         # Also seed secondary admin aliases used by Civora_Admin and Civora Frontend demo selectors
