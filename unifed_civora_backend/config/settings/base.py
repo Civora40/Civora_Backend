@@ -18,9 +18,12 @@ DEBUG = get_env("DEBUG", default=(CIVORA_ENV == "development"), cast=bool)
 
 ALLOWED_HOSTS = get_env(
     "ALLOWED_HOSTS",
-    default="localhost,127.0.0.1,0.0.0.0,testserver,.onrender.com",
+    default="localhost,127.0.0.1,0.0.0.0,testserver,.onrender.com,.amijad-civora.com,api.amijad-civora.com",
     cast=Csv(),
 )
+for _required_host in (".onrender.com", ".amijad-civora.com", "api.amijad-civora.com"):
+    if _required_host not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append(_required_host)
 RENDER_EXTERNAL_HOSTNAME = get_env("RENDER_EXTERNAL_HOSTNAME", default="")
 if RENDER_EXTERNAL_HOSTNAME and RENDER_EXTERNAL_HOSTNAME not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append(RENDER_EXTERNAL_HOSTNAME)
@@ -118,9 +121,17 @@ DATABASES = {
 }
 CSRF_TRUSTED_ORIGINS = get_env(
     "CSRF_TRUSTED_ORIGINS",
-    default="https://*.onrender.com,http://localhost:3000,http://localhost:3001",
+    default="https://*.onrender.com,https://*.amijad-civora.com,https://amijad-civora.com,https://*.vercel.app,http://localhost:3000,http://localhost:3001",
     cast=Csv(),
 )
+for _trusted_origin in (
+    "https://*.onrender.com",
+    "https://*.amijad-civora.com",
+    "https://amijad-civora.com",
+    "https://*.vercel.app",
+):
+    if _trusted_origin not in CSRF_TRUSTED_ORIGINS:
+        CSRF_TRUSTED_ORIGINS.append(_trusted_origin)
 
 # ==============================================================================
 # AUTHENTICATION & PASSWORD VALIDATION
@@ -128,9 +139,9 @@ CSRF_TRUSTED_ORIGINS = get_env(
 AUTH_USER_MODEL = "users.User"
 
 # Dedicated Platform Administrator Credentials (configurable via .env)
-CIVORA_ADMIN_EMAIL = get_env("CIVORA_ADMIN_EMAIL", default="admin@civora.internal")
-CIVORA_ADMIN_PASSWORD = get_env("CIVORA_ADMIN_PASSWORD", default="Civora2026!")
-CIVORA_ADMIN_NAME = get_env("CIVORA_ADMIN_NAME", default="Engr. Babatunde Fashola-Smith")
+CIVORA_ADMIN_EMAIL = get_env("CIVORA_ADMIN_EMAIL", default="Civora40@gmail.com")
+CIVORA_ADMIN_PASSWORD = get_env("CIVORA_ADMIN_PASSWORD", default="Civora@40Admin#2026!")
+CIVORA_ADMIN_NAME = get_env("CIVORA_ADMIN_NAME", default="Civora Platform Administrator")
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
@@ -211,6 +222,7 @@ CORS_ALLOWED_ORIGINS = get_env(
 )
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https://.*\.vercel\.app$",
+    r"^https://(.*\.)?amijad-civora\.com$",
 ]
 CORS_ALLOW_CREDENTIALS = True
 

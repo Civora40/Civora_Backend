@@ -254,15 +254,16 @@ class FoundationAndTenantIsolationTests(TestCase):
 
     def test_dedicated_admin_login_and_privilege_guard(self):
         call_command("seed_dev")
-        # 1. Dedicated admin can sign into /api/v1/auth/admin/login/
+        # 1. Dedicated admin (Civora40@gmail.com) can sign into /api/v1/auth/admin/login/
         admin_res = self.client.post(
             reverse("auth-admin-login"),
-            data={"email": "admin@civora.internal", "password": "Civora2026!"},
+            data={"email": "Civora40@gmail.com", "password": "Civora@40Admin#2026!"},
             format="json",
         )
         self.assertEqual(admin_res.status_code, status.HTTP_200_OK)
         self.assertTrue(admin_res.data["success"])
         self.assertEqual(admin_res.data["data"]["user"]["role"], "platform_admin")
+        self.assertEqual(admin_res.data["data"]["user"]["email"], "civora40@gmail.com")
 
         # 2. Non-admin project engineer is rejected from /api/v1/auth/admin/login/ with 403
         pe_admin_attempt = self.client.post(

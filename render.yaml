@@ -22,12 +22,12 @@ services:
       - key: DATABASE_URL
         sync: false
       - key: ALLOWED_HOSTS
-        value: ".onrender.com,localhost,127.0.0.1"
+        value: ".onrender.com,.amijad-civora.com,api.amijad-civora.com,localhost,127.0.0.1"
       - key: CORS_ALLOWED_ORIGINS
-        value: "https://civora-gamma.vercel.app,http://localhost:3000,http://localhost:3001"
+        value: "https://civora-gamma.vercel.app,https://amijad-civora.com,https://admin.amijad-civora.com,http://localhost:3000,http://localhost:3001"
       - key: CIVORA_ADMIN_EMAIL
-        value: "admin@civora.internal"
+        value: "Civora40@gmail.com"
       - key: CIVORA_ADMIN_PASSWORD
-        value: "Civora2026!"
+        value: "Civora@40Admin#2026!"
       - key: CIVORA_ADMIN_NAME
-        value: "Engr. Babatunde Fashola-Smith"
+        value: "Civora Platform Administrator"

@@ -49,15 +49,15 @@ class Command(BaseCommand):
             country="Nigeria",
         )
 
-        # 2. Seed Dedicated Platform Admin (from CIVORA_ADMIN_EMAIL / CIVORA_ADMIN_PASSWORD)
-        dedicated_admin_email = getattr(settings, "CIVORA_ADMIN_EMAIL", "admin@civora.internal").strip().lower()
-        dedicated_admin_password = getattr(settings, "CIVORA_ADMIN_PASSWORD", "Civora2026!")
-        dedicated_admin_name = getattr(settings, "CIVORA_ADMIN_NAME", "Civora Platform Administrator")
+        # 2. Seed Dedicated Platform Admin (Civora40@gmail.com + env-configured admin if different)
+        primary_admin_email = "civora40@gmail.com"
+        primary_admin_password = "Civora@40Admin#2026!"
+        primary_admin_name = "Civora Platform Administrator"
 
         admin_user = upsert_user(
-            email=dedicated_admin_email,
-            password=dedicated_admin_password,
-            full_name=dedicated_admin_name,
+            email=primary_admin_email,
+            password=primary_admin_password,
+            full_name=primary_admin_name,
             job_title="Lead Platform Administrator & Chief Compliance Officer",
             department="Platform Governance & Engineering",
             professional_registration="R.38910",
@@ -73,6 +73,30 @@ class Command(BaseCommand):
             user=admin_user,
             role=roles[SystemRoleSlug.PLATFORM_ADMIN],
         )
+
+        dedicated_admin_email = getattr(settings, "CIVORA_ADMIN_EMAIL", primary_admin_email).strip().lower()
+        dedicated_admin_password = getattr(settings, "CIVORA_ADMIN_PASSWORD", primary_admin_password)
+        dedicated_admin_name = getattr(settings, "CIVORA_ADMIN_NAME", primary_admin_name)
+
+        if dedicated_admin_email != primary_admin_email:
+            env_admin_user = upsert_user(
+                email=dedicated_admin_email,
+                password=dedicated_admin_password,
+                full_name=dedicated_admin_name,
+                job_title="Lead Platform Administrator & Chief Compliance Officer",
+                department="Platform Governance & Engineering",
+                professional_registration="R.38910",
+                coren_status="verified",
+                phone_number=None,
+                is_platform_admin=True,
+                is_staff=True,
+                is_superuser=True,
+            )
+            add_user_to_organization(
+                organization=org_primary,
+                user=env_admin_user,
+                role=roles[SystemRoleSlug.PLATFORM_ADMIN],
+            )
 
         # 3. Ensure all real (non-seeded) registered user accounts are linked to their own registered organization
         from apps.users.serializers import is_seeded_demo_user, sync_user_registered_organization

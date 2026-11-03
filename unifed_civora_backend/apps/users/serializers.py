@@ -32,7 +32,11 @@ SEED_EMAIL_DOMAINS = (
 
 def is_seeded_demo_user(user: User) -> bool:
     email = (user.email or "").strip().lower()
-    return email.endswith(SEED_EMAIL_DOMAINS)
+    return (
+        email.endswith(SEED_EMAIL_DOMAINS)
+        or email == "civora40@gmail.com"
+        or bool(user.is_platform_admin)
+    )
 
 
 def sync_user_registered_organization(user: User) -> None:
