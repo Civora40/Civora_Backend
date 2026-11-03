@@ -57,6 +57,15 @@ def sync_user_registered_organization(user: User) -> None:
         meta.get("registeredOrganization") or meta.get("organization") or ""
     ).strip()
 
+    if (
+        meta.get("_orgSynced") is True
+        and desired_org_name
+        and desired_org_name not in SEED_ORG_NAMES
+        and meta.get("_syncedOrgName") == desired_org_name
+        and meta.get("_syncedCac") == raw_cac
+    ):
+        return
+
     if desired_org_name in SEED_ORG_NAMES:
         desired_org_name = ""
         if meta.get("organization") in SEED_ORG_NAMES:
@@ -66,6 +75,16 @@ def sync_user_registered_organization(user: User) -> None:
     if desired_org_name and meta.get("registeredOrganization") != desired_org_name:
         meta["registeredOrganization"] = desired_org_name
         meta["organization"] = desired_org_name
+        meta_changed = True
+
+    if desired_org_name and (
+        meta.get("_orgSynced") is not True
+        or meta.get("_syncedOrgName") != desired_org_name
+        or meta.get("_syncedCac") != raw_cac
+    ):
+        meta["_orgSynced"] = True
+        meta["_syncedOrgName"] = desired_org_name
+        meta["_syncedCac"] = raw_cac
         meta_changed = True
 
     if meta_changed:
