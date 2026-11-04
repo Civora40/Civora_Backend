@@ -91,3 +91,4 @@ Every record in the Civora backend enforces explicit multi-tenant isolation thro
    - Operational authorship references (`submitted_by`, `reviewed_by`, `prepared_by`, `created_by`, `actor`) use `models.SET_NULL` (or `models.PROTECT` on formal approvals) so historical submissions, tasks, reports, and audit trails remain intact if a user account is deactivated.
 3. **RBAC Role Integrity**:
    - `OrganizationMembership.role`, `ProjectMembership.role`, and `OrganizationInvitation.role` use `models.PROTECT` to prevent deletion of active RBAC roles.
+

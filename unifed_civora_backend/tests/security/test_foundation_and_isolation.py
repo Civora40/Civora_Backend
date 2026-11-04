@@ -753,6 +753,116 @@ class FoundationAndTenantIsolationTests(TestCase):
             1,
         )
 
+    def test_phase_2_api_endpoints_for_engineer_stakeholder_and_admin(self):
+        self.client.force_authenticate(user=self.pe_alpha)
+        org_header = {"HTTP_X_ORGANIZATION_ID": str(self.org_a.id)}
+
+        # 1. Create & list Submission via /api/v1/submissions/
+        sub_create = self.client.post(
+            reverse("submission-list"),
+            data={
+                "projectId": str(self.project_alpha.id),
+                "title": "Viaduct Span 3 Post-Tensioning Grout Log",
+                "description": "Grout cube strength verified at 38 MPa.",
+                "sourceChannel": "whatsapp",
+                "attachments": [{"originalFilename": "span3_grout.pdf", "mimeType": "application/pdf", "fileSizeBytes": 124000}],
+            },
+            format="json",
+            **org_header,
+        )
+        self.assertEqual(sub_create.status_code, status.HTTP_201_CREATED)
+        sub_id = sub_create.data["data"]["id"]
+
+        sub_list = self.client.get(reverse("submission-list"), **org_header)
+        self.assertEqual(sub_list.status_code, status.HTTP_200_OK)
+        self.assertEqual(sub_list.data["data"]["totalCount"], 1)
+
+        # 2. Create Task & Activity via /api/v1/tasks/
+        task_create = self.client.post(
+            reverse("task-list"),
+            data={
+                "projectId": str(self.project_alpha.id),
+                "title": "Inspect Span 3 Anchorages",
+                "description": "Check tendon elongation records.",
+            },
+            format="json",
+            **org_header,
+        )
+        self.assertEqual(task_create.status_code, status.HTTP_201_CREATED)
+        task_id = task_create.data["data"]["id"]
+
+        act_create = self.client.post(
+            reverse("task-list"),
+            data={
+                "recordType": "activity",
+                "projectId": str(self.project_alpha.id),
+                "title": "Viaduct Superstructure Post-Tensioning",
+            },
+            format="json",
+            **org_header,
+        )
+        self.assertEqual(act_create.status_code, status.HTTP_201_CREATED)
+
+        # Link submission to task & approve via PATCH /api/v1/submissions/<id>/
+        sub_patch = self.client.patch(
+            reverse("submission-detail", kwargs={"submission_id": sub_id}),
+            data={"reviewStatus": "approved", "linkedTaskId": task_id, "engineerNotes": "Verified compliant."},
+            format="json",
+            **org_header,
+        )
+        self.assertEqual(sub_patch.status_code, status.HTTP_200_OK)
+        self.assertEqual(sub_patch.data["data"]["reviewStatus"], "approved")
+
+        # 3. Create Report & Template via /api/v1/reports/
+        rpt_create = self.client.post(
+            reverse("report-list"),
+            data={
+                "projectId": str(self.project_alpha.id),
+                "title": "Alpha Bridge Weekly Progress Report #1",
+                "executiveSummary": "Span 3 post-tensioning completed on schedule.",
+            },
+            format="json",
+            **org_header,
+        )
+        self.assertEqual(rpt_create.status_code, status.HTTP_201_CREATED)
+        rpt_id = rpt_create.data["data"]["id"]
+
+        # 4. Submit Review Comment & Formal Sign-off Approval via /api/v1/approvals/
+        comment_res = self.client.post(
+            reverse("approval-list"),
+            data={"action": "comment", "reportId": rpt_id, "content": "Verified tendon elongation tables."},
+            format="json",
+            **org_header,
+        )
+        self.assertEqual(comment_res.status_code, status.HTTP_201_CREATED)
+
+        approve_res = self.client.post(
+            reverse("approval-list"),
+            data={"action": "approve", "reportId": rpt_id, "notes": "Approved for stakeholder release."},
+            format="json",
+            **org_header,
+        )
+        self.assertEqual(approve_res.status_code, status.HTTP_201_CREATED)
+
+        # Stakeholder can now view the published report
+        self.client.force_authenticate(user=self.stakeholder_alpha)
+        stk_reports = self.client.get(reverse("report-list"), **org_header)
+        self.assertEqual(stk_reports.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(stk_reports.data["data"]["reports"]), 1)
+
+        # 5. Notifications API
+        notif_create = self.client.post(
+            reverse("notification-list"),
+            data={"title": "Dossier Released", "body": "Report #1 is ready for review."},
+            format="json",
+            **org_header,
+        )
+        self.assertEqual(notif_create.status_code, status.HTTP_201_CREATED)
+        notif_list = self.client.get(reverse("notification-list"), **org_header)
+        self.assertEqual(notif_list.status_code, status.HTTP_200_OK)
+        self.assertEqual(notif_list.data["data"]["unreadCount"], 1)
+
+
 
 
 

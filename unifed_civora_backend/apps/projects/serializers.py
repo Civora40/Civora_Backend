@@ -53,6 +53,14 @@ def serialize_project(project: Project) -> dict:
     ]
 
     active_personnel_count = project.projects_projectmembership_records.filter(is_active=True).count()
+    db_submissions_count = project.submissions_submission_records.count()
+    db_pending_reviews_count = project.submissions_submission_records.filter(
+        status__in=["received", "pending_review", "needs_clarification"]
+    ).count()
+    db_reports_count = project.reports_report_records.count()
+    total_submissions = db_submissions_count or meta.get("submissionsCount", 0)
+    total_pending = db_pending_reviews_count or meta.get("pendingReviewsCount", 0)
+    total_reports = db_reports_count or meta.get("reportsCount", 0)
 
     return {
         # Backend snake_case
@@ -81,12 +89,12 @@ def serialize_project(project: Project) -> dict:
         "corenLeadEngineer": lead_eng,
         "lasbcaPermitNumber": project.lasbca_permit_number or meta.get("lasbcaPermitNumber") or "",
         "progressPercent": project.progress_percent,
-        "submissionsCount": meta.get("submissionsCount", 0),
-        "activeSubmissionsCount": meta.get("submissionsCount", 0),
+        "submissionsCount": total_submissions,
+        "activeSubmissionsCount": total_submissions,
         "activePersonnelCount": active_personnel_count or meta.get("activePersonnelCount", 0),
-        "pendingReviewsCount": meta.get("pendingReviewsCount", 0),
+        "pendingReviewsCount": total_pending,
         "unresolvedFlagsCount": meta.get("unresolvedFlagsCount", 0),
-        "reportsCount": meta.get("reportsCount", 0),
+        "reportsCount": total_reports,
         "lastActivity": meta.get("lastActivity", "Just now"),
         "budgetFormatted": budget_fmt,
         "contractSum": budget_fmt,

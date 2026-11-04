@@ -1,3 +1,6 @@
 from django.urls import path
+from .views import NotificationListCreateView
 
-urlpatterns = []
+urlpatterns = [
+    path("", NotificationListCreateView.as_view(), name="notification-list"),
+]

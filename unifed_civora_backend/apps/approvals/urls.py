@@ -1,3 +1,6 @@
 from django.urls import path
+from .views import ApprovalListCreateView
 
-urlpatterns = []
+urlpatterns = [
+    path("", ApprovalListCreateView.as_view(), name="approval-list"),
+]
