@@ -51,7 +51,7 @@ class Command(BaseCommand):
 
         # 2. Seed Dedicated Platform Admin (Civora40@gmail.com + env-configured admin if different)
         primary_admin_email = "civora40@gmail.com"
-        primary_admin_password = "Civora@40Admin#2026!"
+        primary_admin_password = "v;H#bRZby'Vc#0mT"
         primary_admin_name = "Civora Platform Administrator"
 
         admin_user = upsert_user(

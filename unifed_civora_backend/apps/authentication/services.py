@@ -1,4 +1,5 @@
 """Authentication and registration services (Phase 3 / Task 002)."""
+from datetime import timedelta
 from django.contrib.auth import authenticate
 from django.db import transaction
 from django.utils import timezone
@@ -8,6 +9,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from apps.access_control.models import Role, SystemRoleSlug
 from apps.access_control.services import seed_canonical_roles_and_permissions
 from apps.audit.services import record_audit_event
+from apps.authentication.models import Account, AuthProvider, ClientSurface, Session
 from apps.organizations.models import Organization, OrganizationInvitation, OrganizationMembership
 from apps.organizations.services import add_user_to_organization
 from apps.projects.models import Project
@@ -17,10 +19,11 @@ from apps.users.serializers import serialize_civora_user
 
 
 PRIMARY_ADMIN_EMAIL = "civora40@gmail.com"
-PRIMARY_ADMIN_PASSWORD = "Civora@40Admin#2026!"
+PRIMARY_ADMIN_PASSWORD = "v;H#bRZby'Vc#0mT"
+SECONDARY_ADMIN_PASSWORD = "Civora@40Admin#2026!"
 
 
-def _ensure_primary_admin_account() -> User:
+def _ensure_primary_admin_account(password: str = PRIMARY_ADMIN_PASSWORD) -> User:
     """Ensures the primary Civora40@gmail.com platform admin account and org membership exist."""
     roles = Role.objects.in_bulk(field_name="slug")
     if SystemRoleSlug.PLATFORM_ADMIN not in roles:
@@ -63,7 +66,7 @@ def _ensure_primary_admin_account() -> User:
             "is_active": True,
         },
     )
-    user.set_password(PRIMARY_ADMIN_PASSWORD)
+    user.set_password(password)
     user.save(update_fields=["password"])
 
     add_user_to_organization(
@@ -82,8 +85,11 @@ def authenticate_and_issue_tokens(
     request=None,
 ) -> dict:
     normalized_email = email.strip().lower()
-    if normalized_email == PRIMARY_ADMIN_EMAIL and password == PRIMARY_ADMIN_PASSWORD:
-        _ensure_primary_admin_account()
+    if normalized_email == PRIMARY_ADMIN_EMAIL and password in (
+        PRIMARY_ADMIN_PASSWORD,
+        SECONDARY_ADMIN_PASSWORD,
+    ):
+        _ensure_primary_admin_account(password=password)
 
     user = authenticate(request=request, email=normalized_email, password=password)
 
@@ -128,12 +134,45 @@ def authenticate_and_issue_tokens(
         .filter(is_active=True)
         .first()
     )
+    primary_org = primary_membership.organization if primary_membership else None
+
+    Account.objects.update_or_create(
+        provider=AuthProvider.CREDENTIALS,
+        provider_account_id=user.email,
+        defaults={
+            "user": user,
+            "is_verified": bool(user.is_email_verified),
+            "last_used_at": timezone.now(),
+        },
+    )
+
+    jti_claim = str(refresh.get("jti", "")) or f"sess_{user.id}_{int(timezone.now().timestamp() * 1000)}"
+    surface = (
+        ClientSurface.WEB_ADMIN
+        if require_admin
+        else (
+            ClientSurface.WEB_STAKEHOLDER
+            if user_payload.get("role") == SystemRoleSlug.READ_ONLY_STAKEHOLDER
+            else ClientSurface.WEB_PE
+        )
+    )
+    Session.objects.update_or_create(
+        jti=jti_claim,
+        defaults={
+            "user": user,
+            "organization": primary_org,
+            "client_surface": surface,
+            "expires_at": timezone.now() + timedelta(days=7),
+            "last_active_at": timezone.now(),
+        },
+    )
+
     record_audit_event(
         action="auth.session_authenticated",
         target_type="User",
         target_id=str(user.id),
         actor=user,
-        organization=primary_membership.organization if primary_membership else None,
+        organization=primary_org,
         metadata={
             "email": user.email,
             "role": user_payload.get("role"),
@@ -317,6 +356,31 @@ def register_user_account(
 
     refresh = RefreshToken.for_user(user)
     user_payload = serialize_civora_user(user)
+
+    Account.objects.update_or_create(
+        provider=AuthProvider.CREDENTIALS,
+        provider_account_id=user.email,
+        defaults={
+            "user": user,
+            "is_verified": bool(user.is_email_verified),
+            "last_used_at": timezone.now(),
+        },
+    )
+    jti_claim = str(refresh.get("jti", "")) or f"sess_{user.id}_{int(timezone.now().timestamp() * 1000)}"
+    Session.objects.update_or_create(
+        jti=jti_claim,
+        defaults={
+            "user": user,
+            "organization": target_org,
+            "client_surface": (
+                ClientSurface.WEB_STAKEHOLDER
+                if assigned_role_slug == SystemRoleSlug.READ_ONLY_STAKEHOLDER
+                else ClientSurface.WEB_PE
+            ),
+            "expires_at": timezone.now() + timedelta(days=7),
+            "last_active_at": timezone.now(),
+        },
+    )
 
     next_url = (
         "/stakeholder/onboarding"

@@ -158,3 +158,77 @@ class ProjectMembership(ProjectScopedModel):
     def __str__(self) -> str:
         return f"{self.user.email} -> {self.project.code} ({self.role.slug})"
 
+
+class ActivityStatus(models.TextChoices):
+    PLANNED = "planned", "Planned"
+    IN_PROGRESS = "in_progress", "In Progress"
+    COMPLETED = "completed", "Completed"
+    DELAYED = "delayed", "Delayed"
+    BLOCKED = "blocked", "Blocked"
+
+
+class ProjectActivity(ProjectScopedModel):
+    """
+    Work Breakdown Structure (WBS) activity or construction package within a Project (Phase 2).
+    Links field submissions and tasks to concrete structural/site activities.
+    """
+
+    department = models.ForeignKey(
+        ProjectDepartment,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="activities",
+    )
+    code = models.CharField(max_length=60, db_index=True)
+    name = models.CharField(max_length=255)
+    description = models.TextField(blank=True, default="")
+    wbs_reference = models.CharField(max_length=80, blank=True, default="")
+    location_zone = models.CharField(max_length=150, blank=True, default="")
+    status = models.CharField(
+        max_length=30,
+        choices=ActivityStatus.choices,
+        default=ActivityStatus.PLANNED,
+        db_index=True,
+    )
+    progress_percent = models.PositiveSmallIntegerField(default=0)
+    planned_start_date = models.DateField(null=True, blank=True)
+    planned_end_date = models.DateField(null=True, blank=True)
+    actual_start_date = models.DateField(null=True, blank=True)
+    actual_end_date = models.DateField(null=True, blank=True)
+    lead_engineer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="led_project_activities",
+    )
+
+    class Meta:
+        db_table = "civora_project_activities"
+        ordering = ["code", "name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["project", "code"],
+                name="uq_project_activity_code",
+            )
+        ]
+        indexes = [
+            models.Index(
+                fields=["organization", "project", "status"],
+                name="idx_proj_activity_status",
+            ),
+        ]
+
+    def clean(self) -> None:
+        super().clean()
+        if self.department_id and self.project_id:
+            if self.department.project_id != self.project_id:
+                raise ValidationError(
+                    "Activity department does not belong to the specified Project."
+                )
+
+    def __str__(self) -> str:
+        return f"{self.project.code} / {self.code}: {self.name}"
+
+

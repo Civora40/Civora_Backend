@@ -28,6 +28,6 @@ services:
       - key: CIVORA_ADMIN_EMAIL
         value: "Civora40@gmail.com"
       - key: CIVORA_ADMIN_PASSWORD
-        value: "Civora@40Admin#2026!"
+        value: "v;H#bRZby'Vc#0mT"
       - key: CIVORA_ADMIN_NAME
         value: "Civora Platform Administrator"

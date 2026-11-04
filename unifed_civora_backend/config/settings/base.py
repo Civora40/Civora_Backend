@@ -140,7 +140,7 @@ AUTH_USER_MODEL = "users.User"
 
 # Dedicated Platform Administrator Credentials (configurable via .env)
 CIVORA_ADMIN_EMAIL = get_env("CIVORA_ADMIN_EMAIL", default="Civora40@gmail.com")
-CIVORA_ADMIN_PASSWORD = get_env("CIVORA_ADMIN_PASSWORD", default="Civora@40Admin#2026!")
+CIVORA_ADMIN_PASSWORD = get_env("CIVORA_ADMIN_PASSWORD", default="v;H#bRZby'Vc#0mT")
 CIVORA_ADMIN_NAME = get_env("CIVORA_ADMIN_NAME", default="Civora Platform Administrator")
 
 AUTH_PASSWORD_VALIDATORS = [

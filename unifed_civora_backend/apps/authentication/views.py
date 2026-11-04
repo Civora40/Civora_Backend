@@ -94,7 +94,7 @@ class AdminLoginView(APIView):
         examples=[
             OpenApiExample(
                 "Dedicated Platform Admin",
-                value={"email": "Civora40@gmail.com", "password": "Civora@40Admin#2026!"},
+                value={"email": "Civora40@gmail.com", "password": "v;H#bRZby'Vc#0mT"},
                 request_only=True,
             ),
         ],

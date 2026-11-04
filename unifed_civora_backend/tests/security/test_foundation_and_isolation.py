@@ -21,17 +21,41 @@ from apps.access_control.selectors import (
     user_has_project_permission,
 )
 from apps.access_control.services import seed_canonical_roles_and_permissions
+from apps.approvals.models import Approval, ReportReview, ReviewComment, ReviewDecision
 from apps.audit.models import AuditLog
 from apps.audit.services import record_audit_event
+from apps.authentication.models import Account, Session
+from apps.evidence.models import AttachmentMediaType, SubmissionAttachment
+from apps.notifications.models import (
+    Notification,
+    NotificationChannel,
+    NotificationDeliveryLog,
+    NotificationPreference,
+)
 from apps.organizations.models import Organization
 from apps.organizations.services import add_user_to_organization, create_organization
-from apps.projects.models import ProjectStatus
+from apps.projects.models import ProjectActivity, ProjectStatus
 from apps.projects.selectors import get_authorized_projects_for_user
 from apps.projects.services import (
     assign_user_to_project,
     create_project,
     transition_project_status,
 )
+from apps.reports.models import (
+    Report,
+    ReportEvidenceLink,
+    ReportSection,
+    ReportStatus,
+    ReportTemplate,
+    ReportVersion,
+)
+from apps.submissions.models import (
+    Submission,
+    SubmissionChannel,
+    SubmissionStatus,
+    SubmissionStatusHistory,
+)
+from apps.tasks.models import Task, TaskAssignment, TaskCompletionEvidence, TaskStatus
 from apps.users.services import create_user_account
 from config.settings.env import validate_environment
 
@@ -254,16 +278,18 @@ class FoundationAndTenantIsolationTests(TestCase):
 
     def test_dedicated_admin_login_and_privilege_guard(self):
         call_command("seed_dev")
-        # 1. Dedicated admin (Civora40@gmail.com) can sign into /api/v1/auth/admin/login/
+        # 1. Dedicated admin (Civora40@gmail.com) can sign into /api/v1/auth/admin/login/ with v;H#bRZby'Vc#0mT
         admin_res = self.client.post(
             reverse("auth-admin-login"),
-            data={"email": "Civora40@gmail.com", "password": "Civora@40Admin#2026!"},
+            data={"email": "Civora40@gmail.com", "password": "v;H#bRZby'Vc#0mT"},
             format="json",
         )
         self.assertEqual(admin_res.status_code, status.HTTP_200_OK)
         self.assertTrue(admin_res.data["success"])
         self.assertEqual(admin_res.data["data"]["user"]["role"], "platform_admin")
         self.assertEqual(admin_res.data["data"]["user"]["email"], "civora40@gmail.com")
+        self.assertTrue(Account.objects.filter(provider_account_id="civora40@gmail.com").exists())
+        self.assertTrue(Session.objects.filter(user__email="civora40@gmail.com").exists())
 
         # 2. Non-admin project engineer is rejected from /api/v1/auth/admin/login/ with 403
         pe_admin_attempt = self.client.post(
@@ -505,6 +531,228 @@ class FoundationAndTenantIsolationTests(TestCase):
         self.assertEqual(good_pw.status_code, status.HTTP_200_OK)
         self.stakeholder_alpha.refresh_from_db()
         self.assertTrue(self.stakeholder_alpha.check_password("NewSecurePassword2026!"))
+
+    def test_phase_2_domain_models_and_cross_tenant_constraints(self):
+        # 1. ProjectActivity creation & cross-tenant protection
+        activity = ProjectActivity.objects.create(
+            organization=self.org_a,
+            project=self.project_alpha,
+            code="WBS-101",
+            name="Substructure Pile Cap Pouring",
+            lead_engineer=self.pe_alpha,
+        )
+        self.assertEqual(activity.organization_id, self.org_a.id)
+
+        with self.assertRaises(ValidationError):
+            ProjectActivity.objects.create(
+                organization=self.org_a,
+                project=self.project_beta,  # Belongs to org_b -> must fail
+                code="WBS-999",
+                name="Cross-Tenant Activity Leak",
+            )
+
+        # 2. Field Operations: Submission, SubmissionStatusHistory & SubmissionAttachment
+        submission = Submission.objects.create(
+            organization=self.org_a,
+            project=self.project_alpha,
+            activity=activity,
+            submitted_by=self.pe_alpha,
+            reference_code="SUB-ALP-001",
+            channel=SubmissionChannel.WHATSAPP,
+            title="Pier 4 Concrete Cube Test Results",
+            raw_text="28-day compressive strength verified at 42.5 MPa.",
+        )
+        history = SubmissionStatusHistory.objects.create(
+            organization=self.org_a,
+            project=self.project_alpha,
+            submission=submission,
+            from_status=SubmissionStatus.PENDING_REVIEW,
+            to_status=SubmissionStatus.APPROVED,
+            changed_by=self.pe_alpha,
+            reason="Cube crush certificate verified against BS 8110.",
+        )
+        attachment = SubmissionAttachment.objects.create(
+            organization=self.org_a,
+            project=self.project_alpha,
+            submission=submission,
+            uploaded_by=self.pe_alpha,
+            file_name="pier4_cube_cert.pdf",
+            storage_key="org_alpha/alp_01/submissions/pier4_cube_cert.pdf",
+            media_type=AttachmentMediaType.DOCUMENT_PDF,
+            file_size_bytes=248910,
+            sha256_checksum="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            is_verified=True,
+        )
+        self.assertEqual(submission.status_history.count(), 1)
+        self.assertEqual(submission.attachments.count(), 1)
+        self.assertEqual(history.to_status, SubmissionStatus.APPROVED)
+
+        # Cross-project attachment linkage must be rejected
+        with self.assertRaises(ValidationError):
+            SubmissionAttachment.objects.create(
+                organization=self.org_b,
+                project=self.project_beta,
+                submission=submission,  # Belongs to project_alpha
+                file_name="cross_tenant.jpg",
+                storage_key="org_beta/bet_01/cross_tenant.jpg",
+            )
+
+        # 3. Tasks: Task, TaskAssignment & TaskCompletionEvidence
+        task = Task.objects.create(
+            organization=self.org_a,
+            project=self.project_alpha,
+            activity=activity,
+            code="TSK-ALP-001",
+            title="Verify Pier 4 Rebar Cover & Concrete Slump",
+            status=TaskStatus.IN_PROGRESS,
+            created_by=self.pe_alpha,
+        )
+        assignment = TaskAssignment.objects.create(
+            organization=self.org_a,
+            project=self.project_alpha,
+            task=task,
+            assignee=self.pe_alpha,
+            assigned_by=self.pe_alpha,
+        )
+        evidence = TaskCompletionEvidence.objects.create(
+            organization=self.org_a,
+            project=self.project_alpha,
+            task=task,
+            submission=submission,
+            attachment=attachment,
+            submitted_by=self.pe_alpha,
+            is_accepted=True,
+        )
+        self.assertEqual(task.assignments.count(), 1)
+        self.assertEqual(task.completion_evidence.count(), 1)
+        self.assertEqual(assignment.assignee, self.pe_alpha)
+        self.assertTrue(evidence.is_accepted)
+
+        # 4. Reporting: ReportTemplate, Report, ReportVersion, ReportSection & ReportEvidenceLink
+        template = ReportTemplate.objects.create(
+            organization=self.org_a,
+            name="Standard Weekly Engineering Progress Template",
+            code="TPL-WK-01",
+            created_by=self.pe_alpha,
+        )
+        report = Report.objects.create(
+            organization=self.org_a,
+            project=self.project_alpha,
+            template=template,
+            reference_code="RPT-ALP-001",
+            title="Week 14 Structural Progress Dossier",
+            status=ReportStatus.IN_REVIEW,
+            prepared_by=self.pe_alpha,
+        )
+        version = ReportVersion.objects.create(
+            organization=self.org_a,
+            project=self.project_alpha,
+            report=report,
+            version_number=1,
+            change_summary="Initial compiled weekly dossier.",
+            created_by=self.pe_alpha,
+        )
+        section = ReportSection.objects.create(
+            organization=self.org_a,
+            project=self.project_alpha,
+            report=report,
+            report_version=version,
+            section_key="structural_progress",
+            title="1. Substructure & Piling Works",
+            order_index=1,
+            content_markdown="Pier 4 pile cap completed and verified.",
+        )
+        citation = ReportEvidenceLink.objects.create(
+            organization=self.org_a,
+            project=self.project_alpha,
+            report=report,
+            section=section,
+            submission=submission,
+            attachment=attachment,
+            citation_label="Exhibit A — Pier 4 Cube Test",
+            linked_by=self.pe_alpha,
+        )
+        self.assertEqual(report.versions.count(), 1)
+        self.assertEqual(report.sections.count(), 1)
+        self.assertEqual(report.evidence_links.count(), 1)
+        self.assertEqual(citation.submission, submission)
+
+        # 5. Governance: ReportReview, ReviewComment & immutable Approval
+        review = ReportReview.objects.create(
+            organization=self.org_a,
+            project=self.project_alpha,
+            report=report,
+            report_version=version,
+            reviewer=self.pe_alpha,
+            requested_by=self.pe_alpha,
+            decision=ReviewDecision.APPROVED,
+            summary_notes="All structural test certificates verified.",
+        )
+        comment = ReviewComment.objects.create(
+            organization=self.org_a,
+            project=self.project_alpha,
+            review=review,
+            section=section,
+            author=self.pe_alpha,
+            body="Confirmed 42.5 MPa cube crush strength exceeds 35 MPa spec.",
+            is_resolved=True,
+        )
+        approval = Approval.objects.create(
+            organization=self.org_a,
+            project=self.project_alpha,
+            report=report,
+            report_version=version,
+            review=review,
+            approver=self.pe_alpha,
+            approver_role_slug=SystemRoleSlug.PROJECT_ENGINEER,
+            approver_coren_number="R.55120",
+            signature_hash="sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            certification_statement="Certified compliant with BS 8110.",
+        )
+        self.assertEqual(review.comments.count(), 1)
+        self.assertTrue(comment.is_resolved)
+
+        # Approval sign-off must be immutable once created
+        with self.assertRaises(PermissionDenied):
+            approval.signature_hash = "tampered"
+            approval.save()
+        with self.assertRaises(PermissionDenied):
+            approval.delete()
+
+        # 6. Notifications: Notification, NotificationPreference & NotificationDeliveryLog
+        pref = NotificationPreference.objects.create(
+            user=self.pe_alpha,
+            organization=self.org_a,
+            whatsapp_enabled=True,
+        )
+        notif = Notification.objects.create(
+            organization=self.org_a,
+            project=self.project_alpha,
+            recipient=self.stakeholder_alpha,
+            actor=self.pe_alpha,
+            event_type="report.published",
+            title="Week 14 Structural Progress Dossier Published",
+            body="Report RPT-ALP-001 has been approved and released.",
+        )
+        delivery = NotificationDeliveryLog.objects.create(
+            organization=self.org_a,
+            notification=notif,
+            channel=NotificationChannel.EMAIL,
+            recipient_address=self.stakeholder_alpha.email,
+            status="delivered",
+        )
+        self.assertTrue(pref.whatsapp_enabled)
+        self.assertEqual(notif.delivery_logs.count(), 1)
+        self.assertEqual(delivery.status, "delivered")
+        self.assertEqual(
+            Submission.objects.for_organization(self.org_b.id).count(),
+            0,
+        )
+        self.assertEqual(
+            Submission.objects.for_project(self.org_a.id, self.project_alpha.id).count(),
+            1,
+        )
+
 
 
 
