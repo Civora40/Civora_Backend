@@ -169,6 +169,10 @@ class ProjectListView(APIView):
         req_status = body.get("status", "active")
         db_status = ProjectStatus.SETUP if req_status == "planning" else ProjectStatus.ACTIVE
 
+        specs_reference = body.get("specsReference") or "Eurocode 2 & FMWH Standard Specifications (C35/45)"
+        project_type = body.get("projectType") or "Road / Highway"
+        scope_summary = body.get("scopeSummary") or body.get("description") or ""
+
         project = Project.objects.create(
             organization=org,
             name=name,
@@ -180,10 +184,10 @@ class ProjectListView(APIView):
             lead_engineer_name=body.get("leadEngineer") or request.user.full_name,
             lasbca_permit_number=body.get("lasbcaPermitNumber") or "",
             budget_formatted=formatted_budget,
-            specs_reference=body.get("specsReference") or "Eurocode 2 & FMWH Standard Specifications (C35/45)",
+            specs_reference=specs_reference,
             progress_percent=0,
             project_metadata={
-                "projectType": body.get("projectType") or "Road / Highway",
+                "projectType": project_type,
                 "contractRef": body.get("contractRef") or "",
                 "priority": body.get("priority") or "normal",
                 "country": body.get("country") or "Nigeria",
@@ -193,7 +197,7 @@ class ProjectListView(APIView):
                 "coordinates": body.get("coordinates") or "",
                 "startDate": body.get("startDate") or "",
                 "completionDate": body.get("completionDate") or "",
-                "scopeSummary": body.get("scopeSummary") or "",
+                "scopeSummary": scope_summary,
                 "deliverables": body.get("deliverables") if isinstance(body.get("deliverables"), list) else [],
                 "milestonesList": body.get("milestonesList") if isinstance(body.get("milestonesList"), list) else [],
                 "constraints": body.get("constraints") or "",
@@ -215,6 +219,13 @@ class ProjectListView(APIView):
                 "requireLabBreakCert": body.get("requireLabBreakCert", True),
                 "requireGeotaggedPhotos": body.get("requireGeotaggedPhotos", True),
                 "governanceNotes": body.get("governanceNotes") or "",
+                "specificationFolder": {
+                    "code": f"{code}-SPEC",
+                    "name": f"{name} — Specification Folder",
+                    "sector": project_type,
+                    "specsReference": specs_reference,
+                    "description": scope_summary or f"Project specification, deliverables, and QA governance folder for {name} ({code}).",
+                },
             },
             created_by=request.user,
         )

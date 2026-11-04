@@ -7,13 +7,29 @@ def serialize_project(project: Project) -> dict:
     meta = project.project_metadata or {}
     org_name = project.organization.name if project.organization else ""
     client_str = project.client_name or meta.get("client") or org_name
-    lead_eng = project.lead_engineer_name or meta.get("leadEngineer") or "Marcus Vance, PE (COREN Reg.)"
-    budget_fmt = project.budget_formatted or meta.get("budgetFormatted") or "₦42.5B"
+    lead_eng = (
+        project.lead_engineer_name
+        or meta.get("leadEngineer")
+        or (project.created_by.full_name if getattr(project, "created_by", None) else "")
+        or "Assigned Project Engineer"
+    )
+    budget_fmt = project.budget_formatted or meta.get("budgetFormatted") or "₦0"
     specs_ref = (
         project.specs_reference
         or meta.get("specsReference")
         or "Eurocode 2 & FMWH Standard Specifications (C35/45)"
     )
+    project_type = meta.get("projectType") or "Civil Infrastructure"
+    scope_summary = meta.get("scopeSummary") or project.description or ""
+    spec_folder = meta.get("specificationFolder") or {
+        "id": f"fld_spec_{project.id}",
+        "name": f"{project.name} — Specification Folder",
+        "code": f"{project.code}-SPEC",
+        "sector": project_type,
+        "specsReference": specs_ref,
+        "description": scope_summary or f"Project specification, deliverables, and QA governance folder for {project.name} ({project.code}).",
+        "projectId": str(project.id),
+    }
 
     # Map backend ProjectStatus (`draft`, `setup`, `active`, `on_hold`, `completed`, `archived`)
     # to frontend status expectations while preserving canonical `status`
@@ -63,11 +79,11 @@ def serialize_project(project: Project) -> dict:
         "frontendStatus": fe_status,
         "leadEngineer": lead_eng,
         "corenLeadEngineer": lead_eng,
-        "lasbcaPermitNumber": project.lasbca_permit_number or meta.get("lasbcaPermitNumber") or "LASBCA/INFRA/2026/0491",
+        "lasbcaPermitNumber": project.lasbca_permit_number or meta.get("lasbcaPermitNumber") or "",
         "progressPercent": project.progress_percent,
         "submissionsCount": meta.get("submissionsCount", 0),
         "activeSubmissionsCount": meta.get("submissionsCount", 0),
-        "activePersonnelCount": active_personnel_count or meta.get("activePersonnelCount", 12),
+        "activePersonnelCount": active_personnel_count or meta.get("activePersonnelCount", 0),
         "pendingReviewsCount": meta.get("pendingReviewsCount", 0),
         "unresolvedFlagsCount": meta.get("unresolvedFlagsCount", 0),
         "reportsCount": meta.get("reportsCount", 0),
@@ -75,16 +91,17 @@ def serialize_project(project: Project) -> dict:
         "budgetFormatted": budget_fmt,
         "contractSum": budget_fmt,
         "specsReference": specs_ref,
-        "startDate": project.start_date.isoformat() if project.start_date else meta.get("startDate", "2026-01-15"),
+        "specificationFolder": spec_folder,
+        "startDate": project.start_date.isoformat() if project.start_date else meta.get("startDate", ""),
         "targetCompletionDate": (
             project.target_completion_date.isoformat()
             if project.target_completion_date
-            else meta.get("completionDate", "2027-06-30")
+            else meta.get("completionDate", "")
         ),
         "completionDate": (
             project.target_completion_date.isoformat()
             if project.target_completion_date
-            else meta.get("completionDate", "2027-06-30")
+            else meta.get("completionDate", "")
         ),
         "integrationsActive": meta.get("submissionChannels", ["whatsapp", "telegram"]),
         "createdAt": project.created_at.isoformat() if project.created_at else None,
