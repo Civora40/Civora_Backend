@@ -416,5 +416,96 @@ class FoundationAndTenantIsolationTests(TestCase):
         self.assertEqual(stk_complete.data["data"]["redirectUrl"], "/stakeholder")
         self.assertEqual(stk_complete.data["data"]["user"]["name"], "Elena Rostova, MBE")
 
+    def test_engineer_and_stakeholder_profile_and_password_updates(self):
+        # 1. Engineer profile, review SLA, notification & organization update via PATCH /api/v1/users/me/
+        self.client.force_authenticate(user=self.pe_alpha)
+        pe_patch = self.client.patch(
+            reverse("users-me"),
+            data={
+                "fullName": "Engr. Sunkanmi Olowonishaye, FNSE",
+                "jobTitle": "Principal Structural Engineer",
+                "department": "Bridges & Heavy Civil",
+                "organization": "Amijad Engineering Consult Ltd",
+                "corenNumber": "COREN/R.88421",
+                "nseNumber": "NSE-55402",
+                "phone": "+234 809 112 2334",
+                "reviewSla": "48h",
+                "defaultSpec": "BS 8110 Structural Concrete",
+                "requireLabBreakCert": True,
+                "requireGeotaggedPhotos": False,
+                "autoFlagLowStrength": True,
+                "inboundSubmissionsAlert": True,
+                "whatsappPushAlerts": False,
+                "telegramBotAlerts": True,
+                "criticalDiscrepancyAlerts": True,
+                "weeklyComplianceDigest": False,
+                "sessionTimeout": "4h",
+            },
+            format="json",
+        )
+        self.assertEqual(pe_patch.status_code, status.HTTP_200_OK)
+        pe_data = pe_patch.data["data"]
+        self.assertEqual(pe_data["name"], "Engr. Sunkanmi Olowonishaye, FNSE")
+        self.assertEqual(pe_data["jobTitle"], "Principal Structural Engineer")
+        self.assertEqual(pe_data["department"], "Bridges & Heavy Civil")
+        self.assertEqual(pe_data["organization"], "Amijad Engineering Consult Ltd")
+        self.assertEqual(pe_data["corenNumber"], "COREN/R.88421")
+        self.assertEqual(pe_data["nseNumber"], "NSE-55402")
+        self.assertEqual(pe_data["reviewSla"], "48h")
+        self.assertEqual(pe_data["defaultSpec"], "BS 8110 Structural Concrete")
+        self.assertFalse(pe_data["requireGeotaggedPhotos"])
+        self.assertFalse(pe_data["whatsappPushAlerts"])
+        self.assertEqual(pe_data["sessionTimeout"], "4h")
+
+        # 2. Stakeholder profile, notification & regional workspace settings update via PATCH /api/v1/users/me/
+        self.client.force_authenticate(user=self.stakeholder_alpha)
+        stk_patch = self.client.patch(
+            reverse("users-me"),
+            data={
+                "fullName": "Chief Tunde Bakare",
+                "organization": "Lagos Metropolitan Transport Authority",
+                "jobTitle": "Executive Sponsor",
+                "phone": "08031234567",
+                "timeZone": "WAT",
+                "dateFormat": "YYYY-MM-DD",
+                "highContrast": True,
+                "sessionTimeout": "15",
+                "notifyReleasedReports": True,
+                "notifyMilestones": False,
+                "notifyAnnouncements": True,
+                "channelEmail": True,
+                "channelInApp": False,
+            },
+            format="json",
+        )
+        self.assertEqual(stk_patch.status_code, status.HTTP_200_OK)
+        stk_data = stk_patch.data["data"]
+        self.assertEqual(stk_data["name"], "Chief Tunde Bakare")
+        self.assertEqual(stk_data["organization"], "Lagos Metropolitan Transport Authority")
+        self.assertEqual(stk_data["jobTitle"], "Executive Sponsor")
+        self.assertEqual(stk_data["timeZone"], "WAT")
+        self.assertEqual(stk_data["dateFormat"], "YYYY-MM-DD")
+        self.assertTrue(stk_data["highContrast"])
+        self.assertFalse(stk_data["notifyMilestones"])
+        self.assertFalse(stk_data["channelInApp"])
+
+        # 3. Password change validation and update
+        bad_pw = self.client.post(
+            reverse("users-change-password"),
+            data={"currentPassword": "WrongPassword!", "newPassword": "NewSecurePassword2026!"},
+            format="json",
+        )
+        self.assertEqual(bad_pw.status_code, status.HTTP_400_BAD_REQUEST)
+
+        good_pw = self.client.post(
+            reverse("users-change-password"),
+            data={"currentPassword": "SecurePassword123!", "newPassword": "NewSecurePassword2026!"},
+            format="json",
+        )
+        self.assertEqual(good_pw.status_code, status.HTTP_200_OK)
+        self.stakeholder_alpha.refresh_from_db()
+        self.assertTrue(self.stakeholder_alpha.check_password("NewSecurePassword2026!"))
+
+
 
 

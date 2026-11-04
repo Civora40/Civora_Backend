@@ -2,13 +2,55 @@
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from drf_spectacular.utils import OpenApiExample, extend_schema, inline_serializer
-from rest_framework import serializers
+from rest_framework import serializers, status
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
 from rest_framework.views import APIView
 from apps.audit.services import record_audit_event
 from common.responses import api_success
 from .models import User
-from .serializers import UserProfileSerializer, serialize_civora_user
+from .serializers import (
+    UserProfileSerializer,
+    serialize_civora_user,
+    sync_user_registered_organization,
+)
+
+
+PROFILE_METADATA_PREFERENCE_KEYS = (
+    "nseNumber",
+    "officeState",
+    "geopoliticalZone",
+    "projectCategory",
+    "standardsBaseline",
+    "testingLab",
+    "reviewSlaDays",
+    "reviewSla",
+    "defaultSpec",
+    "requireLabBreakCert",
+    "requireGeotaggedPhotos",
+    "autoFlagLowStrength",
+    "rfiEscalationTier",
+    "reportingCadence",
+    "lasbcaPermitNumber",
+    "eiaApprovalStatus",
+    "inboundSubmissionsAlert",
+    "whatsappPushAlerts",
+    "telegramBotAlerts",
+    "criticalDiscrepancyAlerts",
+    "weeklyComplianceDigest",
+    "sessionTimeout",
+    "twoFactorEnabled",
+    "notifyReleasedReports",
+    "notifyMilestones",
+    "notifyAnnouncements",
+    "channelEmail",
+    "channelInApp",
+    "dateFormat",
+    "highContrast",
+    "primaryResponsibility",
+    "defaultProject",
+    "reportingPreferences",
+)
 
 
 class CurrentUserProfileView(APIView):
@@ -27,19 +69,26 @@ class CurrentUserProfileView(APIView):
 
     @extend_schema(
         tags=["Users & Onboarding"],
-        summary="Update Current User Profile",
+        summary="Update Current User Profile, Preferences & Credentials",
         request=inline_serializer(
             name="UserProfileUpdateRequest",
             fields={
+                "name": serializers.CharField(required=False),
+                "fullName": serializers.CharField(required=False),
                 "firstName": serializers.CharField(required=False),
                 "lastName": serializers.CharField(required=False),
                 "displayName": serializers.CharField(required=False),
                 "jobTitle": serializers.CharField(required=False),
                 "department": serializers.CharField(required=False),
+                "organization": serializers.CharField(required=False),
+                "cacNumber": serializers.CharField(required=False),
                 "phone": serializers.CharField(required=False),
                 "timeZone": serializers.CharField(required=False),
                 "corenNumber": serializers.CharField(required=False),
                 "corenStatus": serializers.CharField(required=False),
+                "nseNumber": serializers.CharField(required=False),
+                "currentPassword": serializers.CharField(required=False),
+                "newPassword": serializers.CharField(required=False),
             },
         ),
         responses={200: UserProfileSerializer},
@@ -47,50 +96,238 @@ class CurrentUserProfileView(APIView):
     def patch(self, request):
         user: User = request.user
         payload = request.data or {}
-        if "firstName" in payload or "first_name" in payload:
-            user.first_name = payload.get("firstName") or payload.get("first_name") or user.first_name
-        if "lastName" in payload or "last_name" in payload:
-            user.last_name = payload.get("lastName") or payload.get("last_name") or user.last_name
-        if "full_name" in payload or "name" in payload:
-            user.full_name = payload.get("full_name") or payload.get("name") or user.full_name
-        elif user.first_name or user.last_name:
-            user.full_name = f"{user.first_name} {user.last_name}".strip()
+        meta = dict(user.profile_metadata or {})
+
+        # 1. Optional password update if newPassword is provided
+        new_password = payload.get("newPassword") or payload.get("new_password")
+        if new_password:
+            current_password = payload.get("currentPassword") or payload.get("current_password") or ""
+            if not current_password or not user.check_password(current_password):
+                return Response(
+                    {
+                        "success": False,
+                        "error": "Current password is incorrect.",
+                        "detail": "Current password is incorrect.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if len(str(new_password)) < 8:
+                return Response(
+                    {
+                        "success": False,
+                        "error": "New password must be at least 8 characters.",
+                        "detail": "New password must be at least 8 characters.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            user.set_password(str(new_password))
+            record_audit_event(
+                action="users.password_changed",
+                actor=user,
+                target_type="User",
+                target_id=str(user.id),
+            )
+
+        # 2. Identity & Name fields
+        has_first = "firstName" in payload or "first_name" in payload
+        has_last = "lastName" in payload or "last_name" in payload
+        has_full = "fullName" in payload or "full_name" in payload or "name" in payload
+
+        if has_first:
+            first_val = str(payload.get("firstName") if "firstName" in payload else payload.get("first_name") or "").strip()
+            if first_val:
+                user.first_name = first_val[:120]
+        if has_last:
+            last_val = str(payload.get("lastName") if "lastName" in payload else payload.get("last_name") or "").strip()
+            user.last_name = last_val[:120]
+
+        if has_full:
+            full_val = str(
+                payload.get("fullName")
+                or payload.get("full_name")
+                or payload.get("name")
+                or ""
+            ).strip()
+            if full_val:
+                user.full_name = full_val[:255]
+                if not has_first and not has_last:
+                    parts = full_val.split(" ", 1)
+                    user.first_name = parts[0][:120]
+                    user.last_name = (parts[1] if len(parts) > 1 else "")[:120]
+        elif has_first or has_last:
+            user.full_name = f"{user.first_name} {user.last_name}".strip()[:255]
+
         if "displayName" in payload or "display_name" in payload:
-            user.display_name = payload.get("displayName") or payload.get("display_name") or user.display_name
+            disp_val = str(payload.get("displayName") if "displayName" in payload else payload.get("display_name") or "").strip()
+            user.display_name = disp_val[:255]
+        elif has_full and user.full_name:
+            user.display_name = user.full_name
+
         if "jobTitle" in payload or "job_title" in payload or "title" in payload:
-            user.job_title = payload.get("jobTitle") or payload.get("job_title") or payload.get("title") or user.job_title
+            job_val = (
+                payload.get("jobTitle")
+                if "jobTitle" in payload
+                else (payload.get("job_title") if "job_title" in payload else payload.get("title"))
+            )
+            if job_val is not None:
+                user.job_title = str(job_val).strip()[:150]
+
         if "department" in payload:
-            user.department = payload.get("department") or user.department
-        if "phone" in payload or "phone_number" in payload:
-            raw_phone_input = (payload.get("phone") or payload.get("phone_number") or "").strip()
-            cleaned_phone = raw_phone_input.replace(" ", "").replace("-", "")
-            meta = dict(user.profile_metadata or {})
-            if raw_phone_input:
-                meta["phone"] = raw_phone_input
-                user.profile_metadata = meta
+            if payload.get("department") is not None:
+                user.department = str(payload.get("department")).strip()[:150]
+
+        # 3. Organization & CAC Registration
+        org_updated = False
+        clean_org = ""
+        if "organization" in payload or "organizationName" in payload or "organization_name" in payload:
+            raw_org = (
+                payload.get("organization")
+                if "organization" in payload
+                else (payload.get("organizationName") if "organizationName" in payload else payload.get("organization_name"))
+            )
+            if raw_org is not None:
+                clean_org = str(raw_org).strip()[:255]
+                meta["organization"] = clean_org
+                meta["registeredOrganization"] = clean_org
+                org_updated = True
+
+        if "cacNumber" in payload or "cac_number" in payload:
+            raw_cac = payload.get("cacNumber") if "cacNumber" in payload else payload.get("cac_number")
+            if raw_cac is not None:
+                clean_cac = str(raw_cac).strip()[:64]
+                meta["cacNumber"] = clean_cac
+                active_membership = (
+                    user.organization_memberships.select_related("organization")
+                    .filter(is_active=True)
+                    .first()
+                )
+                if active_membership and active_membership.organization and clean_cac:
+                    active_membership.organization.cac_number = clean_cac
+                    active_membership.organization.save(update_fields=["cac_number", "updated_at"])
+
+        # 4. Phone & Timezone
+        if "phone" in payload or "phone_number" in payload or "phoneContact" in payload:
+            raw_phone_input = str(
+                payload.get("phone")
+                if "phone" in payload
+                else (payload.get("phone_number") if "phone_number" in payload else payload.get("phoneContact"))
+                or ""
+            ).strip()
+            cleaned_phone = raw_phone_input.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+            meta["phone"] = raw_phone_input
+            if cleaned_phone.startswith("0") and len(cleaned_phone) == 11 and cleaned_phone[1:].isdigit():
+                cleaned_phone = f"+234{cleaned_phone[1:]}"
             if cleaned_phone.startswith("+") and 8 <= len(cleaned_phone) <= 20:
                 if not User.objects.filter(phone_number=cleaned_phone).exclude(id=user.id).exists():
                     user.phone_number = cleaned_phone
+
         if "timeZone" in payload or "time_zone" in payload or "timezone" in payload:
-            tz_val = payload.get("timeZone") or payload.get("time_zone") or payload.get("timezone")
+            tz_val = (
+                payload.get("timeZone")
+                if "timeZone" in payload
+                else (payload.get("time_zone") if "time_zone" in payload else payload.get("timezone"))
+            )
             if tz_val:
-                user.time_zone = str(tz_val)[:64]
+                user.time_zone = str(tz_val).strip()[:64]
+
+        # 5. COREN & NSE Professional Credentials
         if "corenNumber" in payload or "professional_registration" in payload:
-            reg_val = payload.get("corenNumber") or payload.get("professional_registration")
-            if reg_val:
-                user.professional_registration = str(reg_val).strip()[:120]
+            reg_val = (
+                payload.get("corenNumber")
+                if "corenNumber" in payload
+                else payload.get("professional_registration")
+            )
+            if reg_val is not None:
+                clean_reg = str(reg_val).strip()[:120]
+                user.professional_registration = clean_reg
+                meta["corenNumber"] = clean_reg
+                if clean_reg and user.coren_status == "unregistered":
+                    user.coren_status = "verified"
+
         if "corenStatus" in payload or "coren_status" in payload:
             status_val = str(payload.get("corenStatus") or payload.get("coren_status") or "").strip()
             if status_val in ("verified", "pending", "unregistered"):
                 user.coren_status = status_val
             elif status_val:
-                meta = dict(user.profile_metadata or {})
                 meta["corenCategory"] = status_val
-                user.profile_metadata = meta
                 user.coren_status = "verified" if user.professional_registration else "pending"
 
+        if "nse_number" in payload and "nseNumber" not in payload:
+            meta["nseNumber"] = str(payload.get("nse_number") or "").strip()[:120]
+
+        # 6. Engineer & Stakeholder Preferences in profile_metadata
+        for key in PROFILE_METADATA_PREFERENCE_KEYS:
+            if key in payload and payload[key] is not None:
+                meta[key] = payload[key]
+
+        if org_updated:
+            meta["_orgSynced"] = False
+
+        user.profile_metadata = meta
         user.save()
+
+        if org_updated and clean_org:
+            sync_user_registered_organization(user)
+
+        record_audit_event(
+            action="users.profile_updated",
+            actor=user,
+            target_type="User",
+            target_id=str(user.id),
+        )
         return api_success(data=serialize_civora_user(user), message="Profile updated.")
+
+
+class ChangePasswordView(APIView):
+    """POST /api/v1/users/me/change-password/"""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        tags=["Users & Onboarding"],
+        summary="Change Current User Password",
+        request=inline_serializer(
+            name="ChangePasswordRequest",
+            fields={
+                "currentPassword": serializers.CharField(required=True),
+                "newPassword": serializers.CharField(required=True),
+            },
+        ),
+    )
+    def post(self, request):
+        user: User = request.user
+        payload = request.data or {}
+        current_password = payload.get("currentPassword") or payload.get("current_password") or ""
+        new_password = payload.get("newPassword") or payload.get("new_password") or ""
+
+        if not current_password or not user.check_password(current_password):
+            return Response(
+                {
+                    "success": False,
+                    "error": "Current password is incorrect.",
+                    "detail": "Current password is incorrect.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(str(new_password)) < 8:
+            return Response(
+                {
+                    "success": False,
+                    "error": "New password must be at least 8 characters.",
+                    "detail": "New password must be at least 8 characters.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user.set_password(str(new_password))
+        user.save(update_fields=["password", "updated_at"])
+        record_audit_event(
+            action="users.password_changed",
+            actor=user,
+            target_type="User",
+            target_id=str(user.id),
+        )
+        return api_success(data=serialize_civora_user(user), message="Password updated successfully.")
 
 
 class UserOnboardingView(APIView):
