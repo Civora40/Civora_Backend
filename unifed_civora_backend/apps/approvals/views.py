@@ -7,6 +7,7 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.views import APIView
 from apps.access_control.models import SystemRoleSlug
 from apps.access_control.permissions import IsTenantMember
+from apps.access_control.services import enforce_report_approval_separation_of_duties
 from apps.audit.services import record_audit_event
 from apps.projects.selectors import get_authorized_projects_for_user
 from apps.reports.models import Report, ReportStatus, ReportVersion
@@ -95,6 +96,12 @@ class ApprovalListCreateView(APIView):
             raise ValidationError({"reportId": ["A valid authorized Report is required."]})
 
         action = body.get("action") or ("approve" if body.get("declarationAgreed") or body.get("signatureHash") else "comment")
+        if action != "comment":
+            enforce_report_approval_separation_of_duties(
+                user=request.user,
+                report=report,
+                required_capability="reports.approve",
+            )
         latest_version = report.versions.first() or ReportVersion.objects.create(
             organization=org,
             project=report.project,

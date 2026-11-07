@@ -7,6 +7,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.views import APIView
 from apps.access_control.models import SystemRoleSlug
 from apps.access_control.permissions import IsTenantMember
+from apps.access_control.services import enforce_organization_permission, enforce_project_permission
 from apps.audit.services import record_audit_event
 from apps.evidence.models import AttachmentMediaType, SubmissionAttachment
 from apps.projects.models import Project
@@ -158,6 +159,12 @@ class SubmissionListCreateView(APIView):
                 "organization", "project", "department", "submitted_by", "reviewed_by"
             ).prefetch_related("attachments", "status_history__changed_by")
         else:
+            enforce_organization_permission(
+                user=request.user,
+                organization=request.organization,
+                permission_codename="submissions.view",
+                target_type="Submission",
+            )
             authorized_projects = get_authorized_projects_for_user(
                 user=request.user,
                 organization_id=request.organization.id,
@@ -197,6 +204,14 @@ class SubmissionListCreateView(APIView):
         )
         if not project:
             raise ValidationError({"projectId": ["A valid authorized project is required to log a submission."]})
+
+        enforce_project_permission(
+            user=request.user,
+            organization=org,
+            project=project,
+            permission_codename="submissions.create",
+            target_type="Submission",
+        )
 
         ref_code = (
             body.get("identifier")
@@ -302,16 +317,27 @@ class SubmissionDetailView(APIView):
     @extend_schema(tags=["Submissions"], summary="Retrieve submission details")
     def get(self, request, submission_id):
         sub = self._get_submission(request, submission_id)
+        enforce_project_permission(
+            user=request.user,
+            organization=request.organization,
+            project=sub.project,
+            permission_codename="submissions.view",
+            target_type="Submission",
+            target_id=str(sub.id),
+        )
         return api_success(data=serialize_submission(sub))
 
     @extend_schema(tags=["Submissions"], summary="Review, link task, or update submission status")
     def patch(self, request, submission_id):
-        if not request.user.is_platform_admin:
-            membership = getattr(request, "organization_membership", None)
-            if membership and membership.role.slug == SystemRoleSlug.READ_ONLY_STAKEHOLDER:
-                raise PermissionDenied("Read-only stakeholders cannot modify field submissions.")
-
         sub = self._get_submission(request, submission_id)
+        enforce_project_permission(
+            user=request.user,
+            organization=request.organization,
+            project=sub.project,
+            permission_codename="submissions.verify",
+            target_type="Submission",
+            target_id=str(sub.id),
+        )
         body = request.data or {}
         old_status = sub.status
         payload = dict(sub.structured_payload or {})

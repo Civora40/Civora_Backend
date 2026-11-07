@@ -7,9 +7,11 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.views import APIView
 from apps.access_control.models import Role, SystemRoleSlug
 from apps.access_control.permissions import HasOrganizationCapability, IsTenantMember
+from apps.access_control.services import enforce_project_permission
 from apps.audit.services import record_audit_event
+from apps.users.models import User
 from common.responses import api_success
-from .models import Project, ProjectStatus
+from .models import Project, ProjectDepartment, ProjectMembership, ProjectStatus
 from .selectors import get_authorized_projects_for_user, get_project_members
 from .serializers import ProjectMembershipSerializer, ProjectSerializer, serialize_project
 from .services import assign_user_to_project, transition_project_status
@@ -286,6 +288,14 @@ class ProjectDetailView(APIView):
             organization_id=request.organization.id,
         )
         project = get_object_or_404(qs, id=project_id)
+        enforce_project_permission(
+            user=request.user,
+            organization=request.organization,
+            project=project,
+            permission_codename="projects.update",
+            target_type="Project",
+            target_id=str(project.id),
+        )
         payload = request.data or {}
 
         if "status" in payload and payload["status"] != project.status:
@@ -312,7 +322,7 @@ class ProjectDetailView(APIView):
 
 
 class ProjectMemberListView(APIView):
-    """GET /api/v1/projects/<uuid:project_id>/members/"""
+    """GET, POST /api/v1/projects/<uuid:project_id>/members/"""
 
     permission_classes = [IsTenantMember]
 
@@ -322,9 +332,174 @@ class ProjectMemberListView(APIView):
         responses={200: ProjectMembershipSerializer(many=True)},
     )
     def get(self, request, project_id):
+        qs = get_authorized_projects_for_user(
+            user=request.user,
+            organization_id=request.organization.id,
+        )
+        project = get_object_or_404(qs, id=project_id)
         members = get_project_members(
             organization_id=request.organization.id,
-            project_id=project_id,
+            project_id=project.id,
         )
         serializer = ProjectMembershipSerializer(members, many=True)
         return api_success(data=serializer.data)
+
+    @extend_schema(
+        tags=["Projects"],
+        summary="Assign a tenant user to a project with an explicit RBAC role",
+    )
+    def post(self, request, project_id):
+        project = get_object_or_404(
+            Project.objects.for_organization(request.organization.id),
+            id=project_id,
+        )
+        enforce_project_permission(
+            user=request.user,
+            organization=request.organization,
+            project=project,
+            permission_codename="projects.manage_members",
+            target_type="Project",
+            target_id=str(project.id),
+        )
+
+        body = request.data or {}
+        user_id = body.get("userId") or body.get("user_id")
+        email = (body.get("email") or "").strip().lower()
+        target_user = (
+            User.objects.filter(id=user_id).first()
+            if user_id
+            else User.objects.filter(email=email).first()
+        )
+        if not target_user:
+            raise ValidationError({"user": ["Target user account not found."]})
+
+        role_slug = (body.get("role") or SystemRoleSlug.PROJECT_ENGINEER).strip()
+        if role_slug == SystemRoleSlug.PLATFORM_ADMIN and not request.user.is_platform_admin:
+            raise PermissionDenied("Only Platform Administrators can assign platform_admin.")
+
+        role = Role.objects.filter(slug=role_slug).first()
+        if not role:
+            raise ValidationError({"role": [f"Unknown system role '{role_slug}'."]})
+
+        dept_id = body.get("departmentId") or body.get("department_id")
+        department = (
+            ProjectDepartment.objects.filter(project=project, id=dept_id).first()
+            if dept_id
+            else None
+        )
+
+        try:
+            membership = assign_user_to_project(
+                project=project,
+                user=target_user,
+                role=role,
+                department=department,
+            )
+        except DjangoValidationError as exc:
+            raise ValidationError({"user": exc.messages})
+
+        record_audit_event(
+            action="rbac.project_member_assigned",
+            target_type="ProjectMembership",
+            target_id=str(membership.id),
+            actor=request.user,
+            organization=request.organization,
+            project=project,
+            metadata={
+                "user_id": str(target_user.id),
+                "user_email": target_user.email,
+                "role": role.slug,
+                "project_code": project.code,
+            },
+        )
+        serializer = ProjectMembershipSerializer(membership)
+        return api_success(
+            data=serializer.data,
+            message="Project member assigned.",
+            status_code=status.HTTP_201_CREATED,
+        )
+
+
+class ProjectMemberDetailView(APIView):
+    """PATCH, DELETE /api/v1/projects/<uuid:project_id>/members/<uuid:member_id>/"""
+
+    permission_classes = [IsTenantMember]
+
+    def _get_project_and_membership(self, request, project_id, member_id):
+        project = get_object_or_404(
+            Project.objects.for_organization(request.organization.id),
+            id=project_id,
+        )
+        enforce_project_permission(
+            user=request.user,
+            organization=request.organization,
+            project=project,
+            permission_codename="projects.manage_members",
+            target_type="Project",
+            target_id=str(project.id),
+        )
+        membership = get_object_or_404(
+            ProjectMembership.objects.select_related("user", "role", "department"),
+            id=member_id,
+            organization=request.organization,
+            project=project,
+        )
+        return project, membership
+
+    @extend_schema(tags=["Projects"], summary="Update a project member's role or department")
+    def patch(self, request, project_id, member_id):
+        project, membership = self._get_project_and_membership(request, project_id, member_id)
+        body = request.data or {}
+        previous_role = membership.role.slug if membership.role else ""
+
+        new_role_slug = (body.get("role") or "").strip()
+        if new_role_slug:
+            if new_role_slug == SystemRoleSlug.PLATFORM_ADMIN and not request.user.is_platform_admin:
+                raise PermissionDenied("Only Platform Administrators can assign platform_admin.")
+            new_role = Role.objects.filter(slug=new_role_slug).first()
+            if not new_role:
+                raise ValidationError({"role": [f"Unknown system role '{new_role_slug}'."]})
+            membership.role = new_role
+
+        if "is_active" in body or "isActive" in body:
+            membership.is_active = bool(body.get("isActive") if "isActive" in body else body.get("is_active"))
+
+        membership.save()
+
+        record_audit_event(
+            action="rbac.project_role_changed",
+            target_type="ProjectMembership",
+            target_id=str(membership.id),
+            actor=request.user,
+            organization=request.organization,
+            project=project,
+            metadata={
+                "user_email": membership.user.email,
+                "previous_role": previous_role,
+                "new_role": membership.role.slug,
+                "is_active": membership.is_active,
+            },
+        )
+        serializer = ProjectMembershipSerializer(membership)
+        return api_success(data=serializer.data, message="Project member updated.")
+
+    @extend_schema(tags=["Projects"], summary="Remove a member from a project")
+    def delete(self, request, project_id, member_id):
+        project, membership = self._get_project_and_membership(request, project_id, member_id)
+        membership.is_active = False
+        membership.save(update_fields=["is_active", "updated_at"])
+
+        record_audit_event(
+            action="rbac.project_member_removed",
+            target_type="ProjectMembership",
+            target_id=str(membership.id),
+            actor=request.user,
+            organization=request.organization,
+            project=project,
+            metadata={
+                "user_email": membership.user.email,
+                "role": membership.role.slug,
+                "project_code": project.code,
+            },
+        )
+        return api_success(data={"removed": True, "id": str(membership.id)}, message="Project member removed.")

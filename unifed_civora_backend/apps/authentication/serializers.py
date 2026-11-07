@@ -1,4 +1,4 @@
-"""Authentication serializers."""
+"""Authentication serializers (Phase 3 — Authentication and Authorization)."""
 from rest_framework import serializers
 
 
@@ -23,3 +23,25 @@ class RegisterRequestSerializer(serializers.Serializer):
 
 class PasswordResetRequestSerializer(serializers.Serializer):
     email = serializers.EmailField()
+
+
+class PasswordResetConfirmSerializer(serializers.Serializer):
+    email = serializers.EmailField(required=False, allow_blank=True)
+    token = serializers.CharField()
+    newPassword = serializers.CharField(write_only=True, min_length=8, required=False)
+    new_password = serializers.CharField(write_only=True, min_length=8, required=False)
+
+
+class EmailVerificationRequestSerializer(serializers.Serializer):
+    email = serializers.EmailField(required=False, allow_blank=True)
+
+
+class EmailVerificationConfirmSerializer(serializers.Serializer):
+    email = serializers.EmailField(required=False, allow_blank=True)
+    token = serializers.CharField()
+
+
+class LogoutRequestSerializer(serializers.Serializer):
+    jti = serializers.CharField(required=False, allow_blank=True)
+    sessionId = serializers.UUIDField(required=False)
+    revokeAll = serializers.BooleanField(required=False, default=False)

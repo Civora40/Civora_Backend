@@ -7,6 +7,11 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.views import APIView
 from apps.access_control.models import SystemRoleSlug
 from apps.access_control.permissions import IsTenantMember
+from apps.access_control.selectors import user_has_project_permission
+from apps.access_control.services import (
+    enforce_project_permission,
+    enforce_report_approval_separation_of_duties,
+)
 from apps.audit.services import record_audit_event
 from apps.projects.selectors import get_authorized_projects_for_user
 from common.responses import api_success
@@ -265,17 +270,38 @@ class ReportDetailView(APIView):
     @extend_schema(tags=["Reports"], summary="Get report details by ID")
     def get(self, request, report_id):
         report = self._get_report(request, report_id)
+        if not request.user.is_platform_admin:
+            can_draft_or_review = user_has_project_permission(
+                request.user,
+                report.organization_id,
+                report.project_id,
+                "reports.draft",
+            ) or user_has_project_permission(
+                request.user,
+                report.organization_id,
+                report.project_id,
+                "reports.review",
+            )
+            if not can_draft_or_review and report.status not in (
+                ReportStatus.APPROVED,
+                ReportStatus.PUBLISHED,
+            ):
+                record_audit_event(
+                    action="rbac.permission_denied",
+                    target_type="Report",
+                    target_id=str(report.id),
+                    actor=request.user,
+                    organization=report.organization,
+                    project=report.project,
+                    metadata={"reason": "stakeholder_unreleased_report_access", "status": report.status},
+                )
+                raise PermissionDenied("Read-only stakeholders can only access approved or released reports.")
         return api_success(data=serialize_report(report))
 
     @extend_schema(tags=["Reports"], summary="Update report sections, version, or workflow status")
     def patch(self, request, report_id):
         report = self._get_report(request, report_id)
         body = request.data or {}
-
-        if "title" in body:
-            report.title = body["title"]
-        if "executiveSummary" in body:
-            report.executive_summary = body["executiveSummary"]
 
         new_status = body.get("workflowStatus") or body.get("status")
         status_map = {
@@ -287,8 +313,48 @@ class ReportDetailView(APIView):
             "released": ReportStatus.PUBLISHED,
             "published": ReportStatus.PUBLISHED,
         }
-        if new_status in status_map:
-            report.status = status_map[new_status]
+        target_status = status_map.get(new_status)
+
+        if target_status in (ReportStatus.APPROVED, ReportStatus.PUBLISHED):
+            required_cap = (
+                "reports.release"
+                if target_status == ReportStatus.PUBLISHED
+                else "reports.approve"
+            )
+            enforce_report_approval_separation_of_duties(
+                user=request.user,
+                report=report,
+                required_capability=required_cap,
+            )
+        elif not request.user.is_platform_admin:
+            can_edit = user_has_project_permission(
+                request.user,
+                report.organization_id,
+                report.project_id,
+                "reports.draft",
+            ) or user_has_project_permission(
+                request.user,
+                report.organization_id,
+                report.project_id,
+                "reports.review",
+            )
+            if not can_edit:
+                enforce_project_permission(
+                    user=request.user,
+                    organization=report.organization,
+                    project=report.project,
+                    permission_codename="reports.draft",
+                    target_type="Report",
+                    target_id=str(report.id),
+                )
+
+        if "title" in body:
+            report.title = body["title"]
+        if "executiveSummary" in body:
+            report.executive_summary = body["executiveSummary"]
+
+        if target_status:
+            report.status = target_status
             if report.status in (ReportStatus.APPROVED, ReportStatus.PUBLISHED):
                 report.approved_by = request.user
             if report.status == ReportStatus.PUBLISHED and not report.published_at:

@@ -77,6 +77,7 @@ def serialize_membership_record(membership: OrganizationMembership) -> dict:
                 else "project_engineer"
             )
         ),
+        "role": membership.role.slug if membership.role else "project_engineer",
         "role_slug": membership.role.slug if membership.role else "project_engineer",
         "organizationId": str(membership.organization_id),
         "organizationName": membership.organization.name if membership.organization else "",

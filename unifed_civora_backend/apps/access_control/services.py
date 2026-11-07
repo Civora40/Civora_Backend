@@ -1,7 +1,11 @@
-"""RBAC role and permission provisioning services."""
+"""RBAC role provisioning and service-level authorization guards (Phase 3)."""
+from __future__ import annotations
 from typing import Dict, List
 from django.db import transaction
+from rest_framework.exceptions import PermissionDenied
+from apps.audit.services import record_audit_event
 from .models import Permission, Role, RolePermission, SystemRoleSlug
+from .selectors import user_has_organization_permission, user_has_project_permission
 
 
 CANONICAL_PERMISSIONS = [
@@ -87,3 +91,148 @@ def seed_canonical_roles_and_permissions() -> Dict[str, Role]:
 
     return role_map
 
+
+def enforce_organization_permission(
+    *,
+    user,
+    organization,
+    permission_codename: str,
+    target_type: str = "Organization",
+    target_id: str = "",
+    ip_address: str | None = None,
+) -> None:
+    """
+    Service-level guard verifying explicit organization capability and logging
+    unauthorized access attempts to the immutable audit trail.
+    """
+    if user and getattr(user, "is_platform_admin", False):
+        return
+
+    org_id = getattr(organization, "id", organization)
+    if user_has_organization_permission(user, org_id, permission_codename):
+        return
+
+    record_audit_event(
+        action="rbac.permission_denied",
+        target_type=target_type,
+        target_id=str(target_id or org_id or ""),
+        actor=user if (user and getattr(user, "is_authenticated", False)) else None,
+        organization=organization if hasattr(organization, "id") else None,
+        ip_address=ip_address,
+        metadata={
+            "required_permission": permission_codename,
+            "scope": "organization",
+        },
+    )
+    raise PermissionDenied(f"Insufficient permissions: missing '{permission_codename}' capability.")
+
+
+def enforce_project_permission(
+    *,
+    user,
+    organization,
+    project,
+    permission_codename: str,
+    target_type: str = "Project",
+    target_id: str = "",
+    ip_address: str | None = None,
+) -> None:
+    """
+    Service-level guard verifying explicit project membership and capability,
+    logging unauthorized access attempts to the immutable audit trail.
+    """
+    if user and getattr(user, "is_platform_admin", False):
+        return
+
+    org_id = getattr(organization, "id", organization)
+    proj_id = getattr(project, "id", project)
+    if user_has_project_permission(user, org_id, proj_id, permission_codename):
+        return
+
+    record_audit_event(
+        action="rbac.permission_denied",
+        target_type=target_type,
+        target_id=str(target_id or proj_id or ""),
+        actor=user if (user and getattr(user, "is_authenticated", False)) else None,
+        organization=organization if hasattr(organization, "id") else None,
+        project=project if hasattr(project, "id") else None,
+        ip_address=ip_address,
+        metadata={
+            "required_permission": permission_codename,
+            "scope": "project",
+            "project_id": str(proj_id),
+        },
+    )
+    raise PermissionDenied(f"Insufficient project permissions: missing '{permission_codename}' capability.")
+
+
+def enforce_report_approval_separation_of_duties(
+    *,
+    user,
+    report,
+    required_capability: str = "reports.approve",
+    ip_address: str | None = None,
+) -> None:
+    """
+    Enforces Phase 3 governance separation of duties:
+    1. The user must hold `reports.approve` (or `reports.release`) on the project/organization.
+    2. A Project Engineer cannot approve or release their own final report (`report.prepared_by_id == user.id`).
+    """
+    if user and getattr(user, "is_platform_admin", False):
+        return
+
+    # 1. Check explicit capability (`reports.approve` or `reports.release`)
+    has_cap = user_has_project_permission(
+        user,
+        report.organization_id,
+        report.project_id,
+        required_capability,
+    ) or user_has_organization_permission(
+        user,
+        report.organization_id,
+        required_capability,
+    )
+
+    if not has_cap:
+        record_audit_event(
+            action="rbac.separation_of_duties_blocked",
+            target_type="Report",
+            target_id=str(report.id),
+            actor=user,
+            organization=report.organization,
+            project=report.project,
+            ip_address=ip_address,
+            metadata={
+                "reason": "missing_approval_capability",
+                "required_capability": required_capability,
+                "prepared_by_id": str(report.prepared_by_id) if report.prepared_by_id else None,
+            },
+        )
+        raise PermissionDenied(
+            f"Separation of duties: You do not hold '{required_capability}' clearance to approve or release final reports."
+        )
+
+    # 2. Prevent self-approval by the report author unless they are an Organization/Platform Admin
+    if report.prepared_by_id and str(report.prepared_by_id) == str(user.id):
+        is_org_admin = user_has_organization_permission(
+            user,
+            report.organization_id,
+            "organizations.manage",
+        )
+        if not is_org_admin:
+            record_audit_event(
+                action="rbac.separation_of_duties_blocked",
+                target_type="Report",
+                target_id=str(report.id),
+                actor=user,
+                organization=report.organization,
+                project=report.project,
+                ip_address=ip_address,
+                metadata={
+                    "reason": "author_self_approval_prohibited",
+                    "required_capability": required_capability,
+                },
+            )
+            raise PermissionDenied(
+                "Separation of duties violation: The report author cannot approve or release their own final report."
+            )

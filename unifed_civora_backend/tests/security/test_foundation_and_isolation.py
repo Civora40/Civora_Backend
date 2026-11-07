@@ -836,6 +836,32 @@ class FoundationAndTenantIsolationTests(TestCase):
         )
         self.assertEqual(comment_res.status_code, status.HTTP_201_CREATED)
 
+        # Separation of duties: Project Engineer (author) cannot approve their own final report
+        self_approve_res = self.client.post(
+            reverse("approval-list"),
+            data={"action": "approve", "reportId": rpt_id, "notes": "Attempting self-approval."},
+            format="json",
+            **org_header,
+        )
+        self.assertEqual(self_approve_res.status_code, status.HTTP_403_FORBIDDEN)
+
+        # Supervising Technical Reviewer with `reports.approve` signs off the report
+        reviewer_alpha = create_user_account(
+            email="reviewer@alpha.io",
+            full_name="Alpha Supervising Reviewer",
+            password="SecurePassword123!",
+        )
+        add_user_to_organization(
+            organization=self.org_a,
+            user=reviewer_alpha,
+            role=self.roles[SystemRoleSlug.SUPERVISING_REVIEWER],
+        )
+        assign_user_to_project(
+            project=self.project_alpha,
+            user=reviewer_alpha,
+            role=self.roles[SystemRoleSlug.SUPERVISING_REVIEWER],
+        )
+        self.client.force_authenticate(user=reviewer_alpha)
         approve_res = self.client.post(
             reverse("approval-list"),
             data={"action": "approve", "reportId": rpt_id, "notes": "Approved for stakeholder release."},
@@ -861,6 +887,209 @@ class FoundationAndTenantIsolationTests(TestCase):
         notif_list = self.client.get(reverse("notification-list"), **org_header)
         self.assertEqual(notif_list.status_code, status.HTTP_200_OK)
         self.assertEqual(notif_list.data["data"]["unreadCount"], 1)
+
+    def test_phase_3_authentication_sessions_email_verification_and_password_reset(self):
+        # 1. Login issues JWT & creates an active Session keyed by access token jti
+        login_res = self.client.post(
+            reverse("auth-login"),
+            data={"email": "pe@alpha.io", "password": "SecurePassword123!"},
+            format="json",
+        )
+        self.assertEqual(login_res.status_code, status.HTTP_200_OK)
+        access_token = login_res.data["data"]["access"]
+        session_id = login_res.data["data"]["sessionId"]
+
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {access_token}")
+
+        # 2. List sessions via GET /api/v1/auth/sessions/
+        sess_list = self.client.get(reverse("auth-sessions"))
+        self.assertEqual(sess_list.status_code, status.HTTP_200_OK)
+        self.assertTrue(any(s["id"] == session_id and not s["isRevoked"] for s in sess_list.data["data"]))
+
+        # 3. Email verification request & confirmation
+        verify_req = self.client.post(
+            reverse("auth-verify-email-request"),
+            data={"email": "pe@alpha.io"},
+            format="json",
+        )
+        self.assertEqual(verify_req.status_code, status.HTTP_200_OK)
+        verify_token = verify_req.data["data"]["verificationToken"]
+
+        verify_confirm = self.client.post(
+            reverse("auth-verify-email-confirm"),
+            data={"email": "pe@alpha.io", "token": verify_token},
+            format="json",
+        )
+        self.assertEqual(verify_confirm.status_code, status.HTTP_200_OK)
+        self.pe_alpha.refresh_from_db()
+        self.assertTrue(self.pe_alpha.is_email_verified)
+
+        # 4. Revoke session via POST /api/v1/auth/sessions/<id>/revoke/ -> subsequent requests using that JWT must fail with 401
+        revoke_res = self.client.post(reverse("auth-session-revoke", kwargs={"session_id": session_id}))
+        self.assertEqual(revoke_res.status_code, status.HTTP_200_OK)
+        self.assertTrue(revoke_res.data["data"]["isRevoked"])
+
+        rejected_after_revoke = self.client.get(reverse("users-me"))
+        self.assertEqual(rejected_after_revoke.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.client.credentials()
+
+        # 5. Password reset request & confirmation (one-time token + replay protection)
+        pw_req = self.client.post(
+            reverse("auth-password-reset"),
+            data={"email": "pe@alpha.io"},
+            format="json",
+        )
+        self.assertEqual(pw_req.status_code, status.HTTP_200_OK)
+        reset_token = pw_req.data["data"]["resetToken"]
+
+        pw_confirm = self.client.post(
+            reverse("auth-password-reset-confirm"),
+            data={
+                "email": "pe@alpha.io",
+                "token": reset_token,
+                "newPassword": "UpdatedAlphaPassword2026!",
+            },
+            format="json",
+        )
+        self.assertEqual(pw_confirm.status_code, status.HTTP_200_OK)
+        self.pe_alpha.refresh_from_db()
+        self.assertTrue(self.pe_alpha.check_password("UpdatedAlphaPassword2026!"))
+
+        # Replaying the same reset token must be rejected
+        replay_attempt = self.client.post(
+            reverse("auth-password-reset-confirm"),
+            data={
+                "email": "pe@alpha.io",
+                "token": reset_token,
+                "newPassword": "AnotherPassword2026!",
+            },
+            format="json",
+        )
+        self.assertEqual(replay_attempt.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_phase_3_rbac_role_assignment_project_access_and_audit_logging(self):
+        org_header_a = {"HTTP_X_ORGANIZATION_ID": str(self.org_a.id)}
+
+        # 1. Create an Organization Admin for Tenant Alpha
+        org_admin_alpha = create_user_account(
+            email="orgadmin@alpha.io",
+            full_name="Alpha Organization Admin",
+            password="SecurePassword123!",
+        )
+        add_user_to_organization(
+            organization=self.org_a,
+            user=org_admin_alpha,
+            role=self.roles[SystemRoleSlug.ORGANIZATION_ADMIN],
+        )
+
+        # 2. Organization Admin can assign/update roles in Tenant Alpha, but CANNOT assign platform_admin or touch Tenant Beta
+        self.client.force_authenticate(user=org_admin_alpha)
+
+        new_engineer = create_user_account(
+            email="field@alpha.io",
+            full_name="Alpha Field Inspector",
+            password="SecurePassword123!",
+        )
+        assign_org_res = self.client.post(
+            reverse("organization-membership-list"),
+            data={"email": "field@alpha.io", "role": "field_personnel"},
+            format="json",
+            **org_header_a,
+        )
+        self.assertEqual(assign_org_res.status_code, status.HTTP_201_CREATED)
+        membership_id = assign_org_res.data["data"]["id"]
+
+        # Attempt to escalate member to platform_admin must be blocked with 403 and audited
+        escalate_res = self.client.patch(
+            reverse("organization-membership-revoke", kwargs={"membership_id": membership_id}),
+            data={"role": "platform_admin"},
+            format="json",
+            **org_header_a,
+        )
+        self.assertEqual(escalate_res.status_code, status.HTTP_403_FORBIDDEN)
+
+        # Valid role promotion to project_engineer succeeds and is audited
+        promote_res = self.client.patch(
+            reverse("organization-membership-revoke", kwargs={"membership_id": membership_id}),
+            data={"role": "project_engineer"},
+            format="json",
+            **org_header_a,
+        )
+        self.assertEqual(promote_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(promote_res.data["data"]["role"], "project_engineer")
+
+        # 3. Project member assignment, role update & removal via /api/v1/projects/<id>/members/
+        proj_assign_res = self.client.post(
+            reverse("project-member-list", kwargs={"project_id": self.project_alpha.id}),
+            data={"userId": str(new_engineer.id), "role": "field_personnel"},
+            format="json",
+            **org_header_a,
+        )
+        self.assertEqual(proj_assign_res.status_code, status.HTTP_201_CREATED)
+        proj_member_id = proj_assign_res.data["data"]["id"]
+
+        proj_role_patch = self.client.patch(
+            reverse(
+                "project-member-detail",
+                kwargs={"project_id": self.project_alpha.id, "member_id": proj_member_id},
+            ),
+            data={"role": "supervising_reviewer"},
+            format="json",
+            **org_header_a,
+        )
+        self.assertEqual(proj_role_patch.status_code, status.HTTP_200_OK)
+
+        # 4. Permission evaluation endpoints (/api/v1/access-control/my-permissions/ and /evaluate/)
+        self.client.force_authenticate(user=new_engineer)
+        my_perms = self.client.get(
+            f"{reverse('access-control-my-permissions')}?projectId={self.project_alpha.id}",
+            **org_header_a,
+        )
+        self.assertEqual(my_perms.status_code, status.HTTP_200_OK)
+        self.assertEqual(my_perms.data["data"]["projectRole"], "supervising_reviewer")
+        self.assertIn("reports.approve", my_perms.data["data"]["projectPermissions"])
+
+        eval_res = self.client.post(
+            reverse("access-control-evaluate"),
+            data={"permission": "reports.approve", "projectId": str(self.project_alpha.id)},
+            format="json",
+            **org_header_a,
+        )
+        self.assertEqual(eval_res.status_code, status.HTTP_200_OK)
+        self.assertTrue(eval_res.data["data"]["allowed"])
+
+        # 5. Stakeholder restrictions: cannot view raw submissions or unreleased draft reports
+        self.client.force_authenticate(user=self.pe_alpha)
+        draft_rpt = self.client.post(
+            reverse("report-list"),
+            data={
+                "projectId": str(self.project_alpha.id),
+                "title": "Unreleased Internal Draft Dossier",
+                "executiveSummary": "Internal draft only.",
+            },
+            format="json",
+            **org_header_a,
+        )
+        draft_rpt_id = draft_rpt.data["data"]["id"]
+
+        self.client.force_authenticate(user=self.stakeholder_alpha)
+        stk_sub_attempt = self.client.get(reverse("submission-list"), **org_header_a)
+        self.assertEqual(stk_sub_attempt.status_code, status.HTTP_403_FORBIDDEN)
+
+        stk_draft_attempt = self.client.get(
+            reverse("report-detail", kwargs={"report_id": draft_rpt_id}),
+            **org_header_a,
+        )
+        self.assertEqual(stk_draft_attempt.status_code, status.HTTP_403_FORBIDDEN)
+
+        # 6. Verify immutable audit trail captured all sensitive RBAC changes and denials
+        self.assertTrue(AuditLog.objects.filter(action="rbac.organization_role_assigned").exists())
+        self.assertTrue(AuditLog.objects.filter(action="rbac.organization_role_changed").exists())
+        self.assertTrue(AuditLog.objects.filter(action="rbac.privilege_escalation_blocked").exists())
+        self.assertTrue(AuditLog.objects.filter(action="rbac.project_member_assigned").exists())
+        self.assertTrue(AuditLog.objects.filter(action="rbac.project_role_changed").exists())
+        self.assertTrue(AuditLog.objects.filter(action="rbac.permission_denied").exists())
+
 
 
 
