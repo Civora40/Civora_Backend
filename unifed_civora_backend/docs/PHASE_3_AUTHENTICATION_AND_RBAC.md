@@ -78,3 +78,4 @@ All sensitive authentication and authorization events are recorded in the append
 - `rbac.organization_role_assigned`, `rbac.organization_role_changed`, `MEMBERSHIP_REVOKED`, `INVITATION_ISSUED`, `INVITATION_REVOKED`
 - `rbac.project_member_assigned`, `rbac.project_role_changed`, `rbac.project_member_removed`
 - `rbac.permission_denied`, `rbac.tenant_access_denied`, `rbac.privilege_escalation_blocked`, `rbac.separation_of_duties_blocked`
+

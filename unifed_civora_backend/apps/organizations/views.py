@@ -580,3 +580,116 @@ class InvitationRevokeView(APIView):
             metadata={"email": inv.email, "invitation_code": inv.invitation_code},
         )
         return api_success(data=serialize_invitation(inv), message="Invitation revoked.")
+
+
+AcceptInvitationRequestSerializer = inline_serializer(
+    name="AcceptInvitationRequest",
+    fields={
+        "invitation_code": serializers.CharField(
+            required=False,
+            help_text="Explicit invitation code (e.g. CIV-INV-7841)",
+        ),
+        "invitationCode": serializers.CharField(
+            required=False,
+            help_text="CamelCase variant of invitation code",
+        ),
+    },
+)
+
+
+class InvitationAcceptView(APIView):
+    """POST /api/v1/organizations/invitations/accept/"""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        tags=["Organizations & Invitations"],
+        summary="Accept an organization invitation using an invitation code",
+        request=AcceptInvitationRequestSerializer,
+        responses={200: OpenApiTypes.OBJECT},
+    )
+    def post(self, request):
+        payload = request.data or {}
+        inv_code = (
+            payload.get("invitation_code")
+            or payload.get("invitationCode")
+            or payload.get("code")
+            or ""
+        ).strip().upper()
+
+        if not inv_code:
+            raise ValidationError({"invitation_code": ["Invitation code is required."]})
+
+        inv = OrganizationInvitation.objects.select_related(
+            "organization", "role", "invited_by"
+        ).filter(invitation_code=inv_code).first()
+
+        if not inv:
+            raise ValidationError({"invitation_code": ["Invalid invitation code."]})
+
+        if inv.status != "pending":
+            raise ValidationError({"invitation_code": [f"This invitation has already been {inv.status}."]})
+
+        if inv.expires_at and inv.expires_at < timezone.now():
+            inv.status = "expired"
+            inv.save(update_fields=["status", "updated_at"])
+            raise ValidationError({"invitation_code": ["This invitation has expired."]})
+
+        if (
+            inv.email
+            and inv.email.strip().lower() != request.user.email.strip().lower()
+            and not request.user.is_platform_admin
+        ):
+            raise ValidationError({
+                "invitation_code": [f"This invitation was issued specifically to {inv.email}."]
+            })
+
+        membership = add_user_to_organization(
+            organization=inv.organization,
+            user=request.user,
+            role=inv.role,
+            invited_by=inv.invited_by,
+        )
+
+        inv.status = "accepted"
+        inv.accepted_at = timezone.now()
+        inv.save(update_fields=["status", "accepted_at", "updated_at"])
+
+        assigned_projects = []
+        if inv.assigned_project_codes and isinstance(inv.assigned_project_codes, list):
+            from apps.projects.models import Project
+            from apps.projects.services import assign_user_to_project
+
+            for p_code in inv.assigned_project_codes:
+                proj = Project.objects.filter(
+                    organization=inv.organization,
+                    code__iexact=str(p_code).strip(),
+                ).first()
+                if proj:
+                    assign_user_to_project(project=proj, user=request.user, role=inv.role)
+                    assigned_projects.append(proj.code)
+
+        record_audit_event(
+            action="INVITATION_ACCEPTED",
+            target_type="OrganizationInvitation",
+            target_id=str(inv.id),
+            actor=request.user,
+            organization=inv.organization,
+            metadata={
+                "invitation_code": inv.invitation_code,
+                "role": inv.role.slug,
+                "assigned_projects": assigned_projects,
+            },
+        )
+
+        return api_success(
+            data={
+                "organization_id": str(inv.organization_id),
+                "organization_name": inv.organization.name,
+                "role": inv.role.slug,
+                "membership_id": str(membership.id),
+                "assigned_projects": assigned_projects,
+            },
+            message=f"Successfully accepted invitation to {inv.organization.name} as {inv.role.name}.",
+        )
+

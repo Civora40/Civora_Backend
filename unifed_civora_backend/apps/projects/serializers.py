@@ -1,6 +1,68 @@
-"""Serializers for Projects domain (Phase 4 / Task 002)."""
+"""Serializers for Projects domain (Phase 4)."""
+from drf_spectacular.utils import inline_serializer
 from rest_framework import serializers
-from .models import Project, ProjectDepartment, ProjectMembership
+from .models import ActivityStatus, Project, ProjectActivity, ProjectDepartment, ProjectMembership, ProjectStatus
+
+
+def serialize_project_department(dept: ProjectDepartment) -> dict:
+    return {
+        "id": str(dept.id),
+        "organization": str(dept.organization_id),
+        "organizationId": str(dept.organization_id),
+        "project": str(dept.project_id),
+        "projectId": str(dept.project_id),
+        "name": dept.name,
+        "code": dept.code,
+        "description": dept.description,
+        "created_at": dept.created_at.isoformat() if dept.created_at else None,
+        "createdAt": dept.created_at.isoformat() if dept.created_at else None,
+        "updated_at": dept.updated_at.isoformat() if dept.updated_at else None,
+        "updatedAt": dept.updated_at.isoformat() if dept.updated_at else None,
+    }
+
+
+def serialize_project_activity(activity: ProjectActivity) -> dict:
+    dept = activity.department
+    lead = activity.lead_engineer
+    return {
+        "id": str(activity.id),
+        "organization": str(activity.organization_id),
+        "organizationId": str(activity.organization_id),
+        "project": str(activity.project_id),
+        "projectId": str(activity.project_id),
+        "code": activity.code,
+        "name": activity.name,
+        "description": activity.description,
+        "wbs_reference": activity.wbs_reference,
+        "wbsReference": activity.wbs_reference,
+        "location_zone": activity.location_zone,
+        "locationZone": activity.location_zone,
+        "status": activity.status,
+        "progress_percent": activity.progress_percent,
+        "progressPercent": activity.progress_percent,
+        "planned_start_date": activity.planned_start_date.isoformat() if activity.planned_start_date else None,
+        "plannedStartDate": activity.planned_start_date.isoformat() if activity.planned_start_date else None,
+        "planned_end_date": activity.planned_end_date.isoformat() if activity.planned_end_date else None,
+        "plannedEndDate": activity.planned_end_date.isoformat() if activity.planned_end_date else None,
+        "actual_start_date": activity.actual_start_date.isoformat() if activity.actual_start_date else None,
+        "actualStartDate": activity.actual_start_date.isoformat() if activity.actual_start_date else None,
+        "actual_end_date": activity.actual_end_date.isoformat() if activity.actual_end_date else None,
+        "actualEndDate": activity.actual_end_date.isoformat() if activity.actual_end_date else None,
+        "department_id": str(dept.id) if dept else None,
+        "departmentId": str(dept.id) if dept else None,
+        "department_code": dept.code if dept else None,
+        "departmentCode": dept.code if dept else None,
+        "department_name": dept.name if dept else None,
+        "departmentName": dept.name if dept else None,
+        "lead_engineer_id": str(lead.id) if lead else None,
+        "leadEngineerId": str(lead.id) if lead else None,
+        "lead_engineer_name": lead.full_name if lead else None,
+        "leadEngineerName": lead.full_name if lead else None,
+        "created_at": activity.created_at.isoformat() if activity.created_at else None,
+        "createdAt": activity.created_at.isoformat() if activity.created_at else None,
+        "updated_at": activity.updated_at.isoformat() if activity.updated_at else None,
+        "updatedAt": activity.updated_at.isoformat() if activity.updated_at else None,
+    }
 
 
 def serialize_project(project: Project) -> dict:
@@ -31,8 +93,6 @@ def serialize_project(project: Project) -> dict:
         "projectId": str(project.id),
     }
 
-    # Map backend ProjectStatus (`draft`, `setup`, `active`, `on_hold`, `completed`, `archived`)
-    # to frontend status expectations while preserving canonical `status`
     fe_status = (
         "planning"
         if project.status in ("draft", "setup")
@@ -40,15 +100,7 @@ def serialize_project(project: Project) -> dict:
     )
 
     departments = [
-        {
-            "id": str(d.id),
-            "organization": str(d.organization_id),
-            "project": str(d.project_id),
-            "name": d.name,
-            "code": d.code,
-            "description": d.description,
-            "created_at": d.created_at.isoformat() if d.created_at else None,
-        }
+        serialize_project_department(d)
         for d in project.projects_projectdepartment_records.all()
     ]
 
@@ -58,6 +110,7 @@ def serialize_project(project: Project) -> dict:
         status__in=["received", "pending_review", "needs_clarification"]
     ).count()
     db_reports_count = project.reports_report_records.count()
+    db_activities_count = project.projects_projectactivity_records.count()
     total_submissions = db_submissions_count or meta.get("submissionsCount", 0)
     total_pending = db_pending_reviews_count or meta.get("pendingReviewsCount", 0)
     total_reports = db_reports_count or meta.get("reportsCount", 0)
@@ -95,6 +148,7 @@ def serialize_project(project: Project) -> dict:
         "pendingReviewsCount": total_pending,
         "unresolvedFlagsCount": meta.get("unresolvedFlagsCount", 0),
         "reportsCount": total_reports,
+        "activitiesCount": db_activities_count,
         "lastActivity": meta.get("lastActivity", "Just now"),
         "budgetFormatted": budget_fmt,
         "contractSum": budget_fmt,
@@ -124,6 +178,38 @@ class ProjectDepartmentSerializer(serializers.ModelSerializer):
         fields = ["id", "organization", "project", "name", "code", "description", "created_at"]
         read_only_fields = ["id", "organization", "created_at"]
 
+    def to_representation(self, instance):
+        return serialize_project_department(instance)
+
+
+class ProjectActivitySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProjectActivity
+        fields = [
+            "id",
+            "organization",
+            "project",
+            "department",
+            "code",
+            "name",
+            "description",
+            "wbs_reference",
+            "location_zone",
+            "status",
+            "progress_percent",
+            "planned_start_date",
+            "planned_end_date",
+            "actual_start_date",
+            "actual_end_date",
+            "lead_engineer",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "organization", "created_at", "updated_at"]
+
+    def to_representation(self, instance):
+        return serialize_project_activity(instance)
+
 
 class ProjectSerializer(serializers.ModelSerializer):
     class Meta:
@@ -151,6 +237,7 @@ class ProjectMembershipSerializer(serializers.ModelSerializer):
     user_email = serializers.EmailField(source="user.email", read_only=True)
     user_full_name = serializers.CharField(source="user.full_name", read_only=True)
     role_slug = serializers.CharField(source="role.slug", read_only=True)
+    department_name = serializers.CharField(source="department.name", read_only=True, default=None)
 
     class Meta:
         model = ProjectMembership
@@ -164,6 +251,7 @@ class ProjectMembershipSerializer(serializers.ModelSerializer):
             "role",
             "role_slug",
             "department",
+            "department_name",
             "is_active",
             "created_at",
         ]

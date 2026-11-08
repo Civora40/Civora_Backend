@@ -1,4 +1,4 @@
-"""HTTP views for Projects domain (Phase 4 / Task 002)."""
+"""HTTP views for Projects domain (Phase 4)."""
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.shortcuts import get_object_or_404
 from drf_spectacular.utils import OpenApiExample, extend_schema, inline_serializer
@@ -8,13 +8,39 @@ from rest_framework.views import APIView
 from apps.access_control.models import Role, SystemRoleSlug
 from apps.access_control.permissions import HasOrganizationCapability, IsTenantMember
 from apps.access_control.services import enforce_project_permission
+from apps.audit.models import AuditLog
 from apps.audit.services import record_audit_event
+from apps.audit.views import serialize_audit_log
 from apps.users.models import User
 from common.responses import api_success
-from .models import Project, ProjectDepartment, ProjectMembership, ProjectStatus
+from .models import (
+    ActivityStatus,
+    Project,
+    ProjectActivity,
+    ProjectDepartment,
+    ProjectMembership,
+    ProjectStatus,
+)
 from .selectors import get_authorized_projects_for_user, get_project_members
-from .serializers import ProjectMembershipSerializer, ProjectSerializer, serialize_project
-from .services import assign_user_to_project, transition_project_status
+from .serializers import (
+    ProjectActivitySerializer,
+    ProjectDepartmentSerializer,
+    ProjectMembershipSerializer,
+    ProjectSerializer,
+    serialize_project,
+    serialize_project_activity,
+    serialize_project_department,
+)
+from .services import (
+    assign_user_to_project,
+    create_project_activity,
+    create_project_department,
+    delete_project_activity,
+    delete_project_department,
+    transition_project_status,
+    update_project_activity,
+    update_project_department,
+)
 
 CreateProjectRequestSerializer = inline_serializer(
     name="CreateProjectRequest",
@@ -24,7 +50,11 @@ CreateProjectRequestSerializer = inline_serializer(
         "client": serializers.CharField(help_text="Sponsoring ministry, agency, or client organization"),
         "location": serializers.CharField(required=False, allow_blank=True),
         "description": serializers.CharField(required=False, allow_blank=True),
-        "status": serializers.ChoiceField(choices=["active", "planning", "setup"], required=False, default="active"),
+        "status": serializers.ChoiceField(
+            choices=["draft", "setup", "active", "planning"],
+            required=False,
+            default="active",
+        ),
         "leadEngineer": serializers.CharField(required=False, allow_blank=True),
         "lasbcaPermitNumber": serializers.CharField(required=False, allow_blank=True),
         "budgetAmount": serializers.CharField(required=False, allow_blank=True),
@@ -61,10 +91,65 @@ UpdateProjectRequestSerializer = inline_serializer(
         "client_name": serializers.CharField(required=False),
         "lead_engineer_name": serializers.CharField(required=False),
         "budget_formatted": serializers.CharField(required=False),
+        "specs_reference": serializers.CharField(required=False),
+        "lasbca_permit_number": serializers.CharField(required=False),
         "status": serializers.ChoiceField(
-            choices=["setup", "active", "on_hold", "completed", "archived"],
+            choices=["draft", "setup", "active", "on_hold", "completed", "archived"],
             required=False,
         ),
+        "reason": serializers.CharField(required=False, allow_blank=True),
+    },
+)
+
+TransitionStatusRequestSerializer = inline_serializer(
+    name="TransitionProjectStatusRequest",
+    fields={
+        "status": serializers.ChoiceField(
+            choices=["draft", "setup", "active", "on_hold", "completed", "archived"],
+            help_text="Target lifecycle status",
+        ),
+        "reason": serializers.CharField(
+            required=False,
+            allow_blank=True,
+            help_text="Reason for status transition",
+        ),
+    },
+)
+
+CreateDepartmentRequestSerializer = inline_serializer(
+    name="CreateProjectDepartmentRequest",
+    fields={
+        "name": serializers.CharField(help_text="Department name (e.g. Civil / Structural)"),
+        "code": serializers.CharField(help_text="Unique short code (e.g. CIV-STR)"),
+        "description": serializers.CharField(required=False, allow_blank=True),
+    },
+)
+
+CreateActivityRequestSerializer = inline_serializer(
+    name="CreateProjectActivityRequest",
+    fields={
+        "code": serializers.CharField(help_text="WBS activity code (e.g. ACT-001)"),
+        "name": serializers.CharField(help_text="Activity name"),
+        "departmentId": serializers.UUIDField(required=False),
+        "department_id": serializers.UUIDField(required=False),
+        "description": serializers.CharField(required=False, allow_blank=True),
+        "wbsReference": serializers.CharField(required=False, allow_blank=True),
+        "wbs_reference": serializers.CharField(required=False, allow_blank=True),
+        "locationZone": serializers.CharField(required=False, allow_blank=True),
+        "location_zone": serializers.CharField(required=False, allow_blank=True),
+        "status": serializers.ChoiceField(
+            choices=["planned", "in_progress", "completed", "delayed", "blocked"],
+            required=False,
+            default="planned",
+        ),
+        "progressPercent": serializers.IntegerField(required=False, default=0),
+        "progress_percent": serializers.IntegerField(required=False, default=0),
+        "plannedStartDate": serializers.DateField(required=False),
+        "planned_start_date": serializers.DateField(required=False),
+        "plannedEndDate": serializers.DateField(required=False),
+        "planned_end_date": serializers.DateField(required=False),
+        "leadEngineerId": serializers.UUIDField(required=False),
+        "lead_engineer_id": serializers.UUIDField(required=False),
     },
 )
 
@@ -84,11 +169,11 @@ class ProjectListView(APIView):
         responses={200: ProjectSerializer(many=True)},
     )
     def get(self, request):
-        # If platform admin requests all projects without explicit X-Organization-ID filter
         if request.user.is_platform_admin and not request.headers.get("X-Organization-ID"):
             projects = Project.objects.select_related("organization").prefetch_related(
                 "projects_projectdepartment_records",
                 "projects_projectmembership_records",
+                "projects_projectactivity_records",
             ).all()
         else:
             projects = get_authorized_projects_for_user(
@@ -97,6 +182,7 @@ class ProjectListView(APIView):
             ).select_related("organization").prefetch_related(
                 "projects_projectdepartment_records",
                 "projects_projectmembership_records",
+                "projects_projectactivity_records",
             )
         serializer = ProjectSerializer(projects, many=True)
         return api_success(data=serializer.data)
@@ -107,31 +193,8 @@ class ProjectListView(APIView):
         description="Creates a new project under the active tenant organization, assigns the creator, and logs an audit event.",
         request=CreateProjectRequestSerializer,
         responses={201: ProjectSerializer},
-        examples=[
-            OpenApiExample(
-                "Create Highway Project Example",
-                value={
-                    "name": "Lagos-Calabar Coastal Highway — Section 2",
-                    "code": "LCR-S2-2026",
-                    "client": "Federal Ministry of Works & Housing (FMWH)",
-                    "location": "Lekki Free Trade Zone, Lagos",
-                    "description": "10-lane rigid concrete pavement highway corridor with service ducts.",
-                    "status": "active",
-                    "leadEngineer": "Engr. Tunde Bakare, COREN",
-                    "lasbcaPermitNumber": "LASBCA/2026/HWY/0142",
-                    "budgetAmount": "420B",
-                    "currency": "₦",
-                    "projectType": "Road / Highway",
-                    "priority": "critical",
-                    "state": "Lagos",
-                    "city": "Ibeju-Lekki",
-                },
-                request_only=True,
-            )
-        ],
     )
     def post(self, request):
-        # Verify permission: platform_admin or organization member with projects.create / projects.update
         org = request.organization
         if not request.user.is_platform_admin:
             membership = getattr(request, "organization_membership", None)
@@ -168,8 +231,13 @@ class ProjectListView(APIView):
             [p for p in [body.get("city"), body.get("state"), body.get("country")] if p]
         ) or "Authorized Field Site"
 
-        req_status = body.get("status", "active")
-        db_status = ProjectStatus.SETUP if req_status == "planning" else ProjectStatus.ACTIVE
+        req_status = (body.get("status") or "active").strip().lower()
+        if req_status == "planning":
+            db_status = ProjectStatus.SETUP
+        elif req_status in dict(ProjectStatus.choices):
+            db_status = req_status
+        else:
+            db_status = ProjectStatus.ACTIVE
 
         specs_reference = body.get("specsReference") or "Eurocode 2 & FMWH Standard Specifications (C35/45)"
         project_type = body.get("projectType") or "Road / Highway"
@@ -232,7 +300,6 @@ class ProjectListView(APIView):
             created_by=request.user,
         )
 
-        # Assign creator to project membership automatically
         pe_role = (
             getattr(request, "organization_membership", None).role
             if getattr(request, "organization_membership", None)
@@ -248,7 +315,7 @@ class ProjectListView(APIView):
             actor=request.user,
             organization=org,
             project=project,
-            metadata={"code": project.code, "name": project.name},
+            metadata={"code": project.code, "name": project.name, "initial_status": project.status},
         )
 
         return api_success(
@@ -300,11 +367,25 @@ class ProjectDetailView(APIView):
 
         if "status" in payload and payload["status"] != project.status:
             try:
-                transition_project_status(project=project, new_status=payload["status"])
+                transition_project_status(
+                    project=project,
+                    new_status=payload["status"],
+                    actor=request.user,
+                    reason=payload.get("reason", ""),
+                )
             except DjangoValidationError as exc:
                 raise ValidationError({"status": exc.messages})
 
-        for field in ("name", "location", "description", "client_name", "lead_engineer_name", "budget_formatted"):
+        for field in (
+            "name",
+            "location",
+            "description",
+            "client_name",
+            "lead_engineer_name",
+            "budget_formatted",
+            "specs_reference",
+            "lasbca_permit_number",
+        ):
             if field in payload:
                 setattr(project, field, payload[field])
         project.save()
@@ -319,6 +400,55 @@ class ProjectDetailView(APIView):
             metadata={"updated_fields": list(payload.keys())},
         )
         return api_success(data=serialize_project(project), message="Project updated.")
+
+
+class ProjectStatusTransitionView(APIView):
+    """POST /api/v1/projects/<uuid:project_id>/transition-status/"""
+
+    permission_classes = [IsTenantMember]
+
+    @extend_schema(
+        tags=["Projects"],
+        summary="Transition project lifecycle status",
+        request=TransitionStatusRequestSerializer,
+        responses={200: ProjectSerializer},
+    )
+    def post(self, request, project_id):
+        qs = get_authorized_projects_for_user(
+            user=request.user,
+            organization_id=request.organization.id,
+        )
+        project = get_object_or_404(qs, id=project_id)
+        enforce_project_permission(
+            user=request.user,
+            organization=request.organization,
+            project=project,
+            permission_codename="projects.update",
+            target_type="Project",
+            target_id=str(project.id),
+        )
+
+        body = request.data or {}
+        new_status = (body.get("status") or "").strip().lower()
+        reason = (body.get("reason") or "").strip()
+
+        if not new_status:
+            raise ValidationError({"status": ["Target status is required."]})
+
+        try:
+            project = transition_project_status(
+                project=project,
+                new_status=new_status,
+                actor=request.user,
+                reason=reason,
+            )
+        except DjangoValidationError as exc:
+            raise ValidationError({"status": exc.messages})
+
+        return api_success(
+            data=serialize_project(project),
+            message=f"Project status transitioned to '{project.status}'.",
+        )
 
 
 class ProjectMemberListView(APIView):
@@ -410,6 +540,7 @@ class ProjectMemberListView(APIView):
                 "user_email": target_user.email,
                 "role": role.slug,
                 "project_code": project.code,
+                "department": department.code if department else None,
             },
         )
         serializer = ProjectMembershipSerializer(membership)
@@ -461,6 +592,14 @@ class ProjectMemberDetailView(APIView):
                 raise ValidationError({"role": [f"Unknown system role '{new_role_slug}'."]})
             membership.role = new_role
 
+        dept_id = body.get("departmentId") or body.get("department_id")
+        if dept_id is not None:
+            membership.department = (
+                ProjectDepartment.objects.filter(project=project, id=dept_id).first()
+                if dept_id
+                else None
+            )
+
         if "is_active" in body or "isActive" in body:
             membership.is_active = bool(body.get("isActive") if "isActive" in body else body.get("is_active"))
 
@@ -478,6 +617,7 @@ class ProjectMemberDetailView(APIView):
                 "previous_role": previous_role,
                 "new_role": membership.role.slug,
                 "is_active": membership.is_active,
+                "department": membership.department.code if membership.department else None,
             },
         )
         serializer = ProjectMembershipSerializer(membership)
@@ -503,3 +643,355 @@ class ProjectMemberDetailView(APIView):
             },
         )
         return api_success(data={"removed": True, "id": str(membership.id)}, message="Project member removed.")
+
+
+class ProjectDepartmentListView(APIView):
+    """GET, POST /api/v1/projects/<uuid:project_id>/departments/"""
+
+    permission_classes = [IsTenantMember]
+
+    @extend_schema(
+        tags=["Projects"],
+        summary="List departments for a project",
+        responses={200: ProjectDepartmentSerializer(many=True)},
+    )
+    def get(self, request, project_id):
+        qs = get_authorized_projects_for_user(
+            user=request.user,
+            organization_id=request.organization.id,
+        )
+        project = get_object_or_404(qs, id=project_id)
+        depts = project.projects_projectdepartment_records.all()
+        return api_success(data=[serialize_project_department(d) for d in depts])
+
+    @extend_schema(
+        tags=["Projects"],
+        summary="Create a new department in a project",
+        request=CreateDepartmentRequestSerializer,
+        responses={201: ProjectDepartmentSerializer},
+    )
+    def post(self, request, project_id):
+        qs = get_authorized_projects_for_user(
+            user=request.user,
+            organization_id=request.organization.id,
+        )
+        project = get_object_or_404(qs, id=project_id)
+        enforce_project_permission(
+            user=request.user,
+            organization=request.organization,
+            project=project,
+            permission_codename="projects.update",
+            target_type="Project",
+            target_id=str(project.id),
+        )
+
+        body = request.data or {}
+        name = (body.get("name") or "").strip()
+        code = (body.get("code") or "").strip()
+        description = (body.get("description") or "").strip()
+
+        if not name:
+            raise ValidationError({"name": ["Department name is required."]})
+        if not code:
+            raise ValidationError({"code": ["Department code is required."]})
+
+        try:
+            department = create_project_department(
+                project=project,
+                name=name,
+                code=code,
+                description=description,
+                actor=request.user,
+            )
+        except DjangoValidationError as exc:
+            raise ValidationError({"code": exc.messages})
+
+        return api_success(
+            data=serialize_project_department(department),
+            message="Department created.",
+            status_code=status.HTTP_201_CREATED,
+        )
+
+
+class ProjectDepartmentDetailView(APIView):
+    """GET, PATCH, DELETE /api/v1/projects/<uuid:project_id>/departments/<uuid:department_id>/"""
+
+    permission_classes = [IsTenantMember]
+
+    def _get_project_and_department(self, request, project_id, department_id):
+        qs = get_authorized_projects_for_user(
+            user=request.user,
+            organization_id=request.organization.id,
+        )
+        project = get_object_or_404(qs, id=project_id)
+        department = get_object_or_404(
+            project.projects_projectdepartment_records.all(),
+            id=department_id,
+        )
+        return project, department
+
+    @extend_schema(tags=["Projects"], summary="Get department details")
+    def get(self, request, project_id, department_id):
+        _, department = self._get_project_and_department(request, project_id, department_id)
+        return api_success(data=serialize_project_department(department))
+
+    @extend_schema(tags=["Projects"], summary="Update department attributes")
+    def patch(self, request, project_id, department_id):
+        project, department = self._get_project_and_department(request, project_id, department_id)
+        enforce_project_permission(
+            user=request.user,
+            organization=request.organization,
+            project=project,
+            permission_codename="projects.update",
+            target_type="ProjectDepartment",
+            target_id=str(department.id),
+        )
+        body = request.data or {}
+        try:
+            department = update_project_department(
+                department=department,
+                name=body.get("name"),
+                code=body.get("code"),
+                description=body.get("description"),
+                actor=request.user,
+            )
+        except DjangoValidationError as exc:
+            raise ValidationError({"code": exc.messages})
+
+        return api_success(data=serialize_project_department(department), message="Department updated.")
+
+    @extend_schema(tags=["Projects"], summary="Delete department")
+    def delete(self, request, project_id, department_id):
+        project, department = self._get_project_and_department(request, project_id, department_id)
+        enforce_project_permission(
+            user=request.user,
+            organization=request.organization,
+            project=project,
+            permission_codename="projects.update",
+            target_type="ProjectDepartment",
+            target_id=str(department.id),
+        )
+        dept_id = str(department.id)
+        delete_project_department(department=department, actor=request.user)
+        return api_success(data={"deleted": True, "id": dept_id}, message="Department deleted.")
+
+
+class ProjectActivityListView(APIView):
+    """GET, POST /api/v1/projects/<uuid:project_id>/activities/"""
+
+    permission_classes = [IsTenantMember]
+
+    @extend_schema(
+        tags=["Projects"],
+        summary="List WBS activities for a project",
+        responses={200: ProjectActivitySerializer(many=True)},
+    )
+    def get(self, request, project_id):
+        qs = get_authorized_projects_for_user(
+            user=request.user,
+            organization_id=request.organization.id,
+        )
+        project = get_object_or_404(qs, id=project_id)
+        activities = project.projects_projectactivity_records.select_related(
+            "department", "lead_engineer"
+        ).all()
+
+        status_filter = request.query_params.get("status")
+        if status_filter:
+            activities = activities.filter(status=status_filter)
+
+        dept_filter = request.query_params.get("department_id") or request.query_params.get("department")
+        if dept_filter:
+            activities = activities.filter(department_id=dept_filter)
+
+        return api_success(data=[serialize_project_activity(a) for a in activities])
+
+    @extend_schema(
+        tags=["Projects"],
+        summary="Create a new WBS activity in a project",
+        request=CreateActivityRequestSerializer,
+        responses={201: ProjectActivitySerializer},
+    )
+    def post(self, request, project_id):
+        qs = get_authorized_projects_for_user(
+            user=request.user,
+            organization_id=request.organization.id,
+        )
+        project = get_object_or_404(qs, id=project_id)
+        enforce_project_permission(
+            user=request.user,
+            organization=request.organization,
+            project=project,
+            permission_codename="projects.update",
+            target_type="Project",
+            target_id=str(project.id),
+        )
+
+        body = request.data or {}
+        code = (body.get("code") or "").strip()
+        name = (body.get("name") or "").strip()
+        if not code:
+            raise ValidationError({"code": ["Activity code is required."]})
+        if not name:
+            raise ValidationError({"name": ["Activity name is required."]})
+
+        dept_id = body.get("departmentId") or body.get("department_id")
+        department = (
+            project.projects_projectdepartment_records.filter(id=dept_id).first()
+            if dept_id
+            else None
+        )
+
+        lead_id = body.get("leadEngineerId") or body.get("lead_engineer_id")
+        lead_engineer = User.objects.filter(id=lead_id).first() if lead_id else None
+
+        try:
+            activity = create_project_activity(
+                project=project,
+                code=code,
+                name=name,
+                department=department,
+                description=body.get("description", ""),
+                wbs_reference=body.get("wbsReference") or body.get("wbs_reference", ""),
+                location_zone=body.get("locationZone") or body.get("location_zone", ""),
+                status=body.get("status", ActivityStatus.PLANNED),
+                progress_percent=int(body.get("progressPercent") or body.get("progress_percent") or 0),
+                planned_start_date=body.get("plannedStartDate") or body.get("planned_start_date"),
+                planned_end_date=body.get("plannedEndDate") or body.get("planned_end_date"),
+                actual_start_date=body.get("actualStartDate") or body.get("actual_start_date"),
+                actual_end_date=body.get("actualEndDate") or body.get("actual_end_date"),
+                lead_engineer=lead_engineer,
+                actor=request.user,
+            )
+        except DjangoValidationError as exc:
+            raise ValidationError({"code": exc.messages})
+
+        return api_success(
+            data=serialize_project_activity(activity),
+            message="Project activity created.",
+            status_code=status.HTTP_201_CREATED,
+        )
+
+
+class ProjectActivityDetailView(APIView):
+    """GET, PATCH, DELETE /api/v1/projects/<uuid:project_id>/activities/<uuid:activity_id>/"""
+
+    permission_classes = [IsTenantMember]
+
+    def _get_project_and_activity(self, request, project_id, activity_id):
+        qs = get_authorized_projects_for_user(
+            user=request.user,
+            organization_id=request.organization.id,
+        )
+        project = get_object_or_404(qs, id=project_id)
+        activity = get_object_or_404(
+            project.projects_projectactivity_records.select_related("department", "lead_engineer"),
+            id=activity_id,
+        )
+        return project, activity
+
+    @extend_schema(tags=["Projects"], summary="Get WBS activity details")
+    def get(self, request, project_id, activity_id):
+        _, activity = self._get_project_and_activity(request, project_id, activity_id)
+        return api_success(data=serialize_project_activity(activity))
+
+    @extend_schema(tags=["Projects"], summary="Update WBS activity details or progress")
+    def patch(self, request, project_id, activity_id):
+        project, activity = self._get_project_and_activity(request, project_id, activity_id)
+        enforce_project_permission(
+            user=request.user,
+            organization=request.organization,
+            project=project,
+            permission_codename="projects.update",
+            target_type="ProjectActivity",
+            target_id=str(activity.id),
+        )
+
+        body = request.data or {}
+        updates = {}
+        for key, field in (
+            ("name", "name"),
+            ("description", "description"),
+            ("wbsReference", "wbs_reference"),
+            ("wbs_reference", "wbs_reference"),
+            ("locationZone", "location_zone"),
+            ("location_zone", "location_zone"),
+            ("status", "status"),
+            ("progressPercent", "progress_percent"),
+            ("progress_percent", "progress_percent"),
+            ("plannedStartDate", "planned_start_date"),
+            ("planned_start_date", "planned_start_date"),
+            ("plannedEndDate", "planned_end_date"),
+            ("planned_end_date", "planned_end_date"),
+            ("actualStartDate", "actual_start_date"),
+            ("actual_start_date", "actual_start_date"),
+            ("actualEndDate", "actual_end_date"),
+            ("actual_end_date", "actual_end_date"),
+        ):
+            if key in body:
+                updates[field] = body[key]
+
+        dept_id = body.get("departmentId") or body.get("department_id")
+        if dept_id is not None:
+            updates["department"] = (
+                project.projects_projectdepartment_records.filter(id=dept_id).first()
+                if dept_id
+                else None
+            )
+
+        lead_id = body.get("leadEngineerId") or body.get("lead_engineer_id")
+        if lead_id is not None:
+            updates["lead_engineer"] = User.objects.filter(id=lead_id).first() if lead_id else None
+
+        activity = update_project_activity(activity=activity, actor=request.user, **updates)
+        return api_success(data=serialize_project_activity(activity), message="Project activity updated.")
+
+    @extend_schema(tags=["Projects"], summary="Delete WBS activity")
+    def delete(self, request, project_id, activity_id):
+        project, activity = self._get_project_and_activity(request, project_id, activity_id)
+        enforce_project_permission(
+            user=request.user,
+            organization=request.organization,
+            project=project,
+            permission_codename="projects.update",
+            target_type="ProjectActivity",
+            target_id=str(activity.id),
+        )
+        act_id = str(activity.id)
+        delete_project_activity(activity=activity, actor=request.user)
+        return api_success(data={"deleted": True, "id": act_id}, message="Project activity deleted.")
+
+
+class ProjectActivityHistoryView(APIView):
+    """GET /api/v1/projects/<uuid:project_id>/activity-history/"""
+
+    permission_classes = [IsTenantMember]
+
+    @extend_schema(
+        tags=["Projects"],
+        summary="Get chronological activity and audit history for a project",
+        responses={200: serializers.ListSerializer(child=serializers.DictField())},
+    )
+    def get(self, request, project_id):
+        qs = get_authorized_projects_for_user(
+            user=request.user,
+            organization_id=request.organization.id,
+        )
+        project = get_object_or_404(qs, id=project_id)
+        enforce_project_permission(
+            user=request.user,
+            organization=request.organization,
+            project=project,
+            permission_codename="projects.view",
+            target_type="Project",
+            target_id=str(project.id),
+        )
+
+        logs = AuditLog.objects.select_related("actor", "organization", "project").filter(
+            project=project
+        ).order_by("-created_at")[:100]
+
+        return api_success(
+            data=[serialize_audit_log(log) for log in logs],
+            message="Project activity history retrieved.",
+        )

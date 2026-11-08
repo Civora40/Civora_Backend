@@ -111,7 +111,10 @@ def serialize_invitation(inv: OrganizationInvitation) -> dict:
         "expiresAt": inv.expires_at.isoformat() if inv.expires_at else None,
         "status": inv.status,
         "invitationCode": inv.invitation_code,
+        "invitation_code": inv.invitation_code,
+        "role_slug": inv.role.slug if inv.role else "project_engineer",
         "assignedProjects": inv.assigned_project_codes or [],
+        "assigned_projects": inv.assigned_project_codes or [],
     }
 
 
