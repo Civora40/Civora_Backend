@@ -645,3 +645,4 @@ class Phase4OrganizationAndProjectManagementTests(TestCase):
         self.assertEqual(outsider_list.status_code, status.HTTP_200_OK)
         project_ids_visible = [p["id"] for p in outsider_list.data["data"]]
         self.assertNotIn(project_id, project_ids_visible)
+
