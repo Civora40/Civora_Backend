@@ -10,8 +10,9 @@ from apps.access_control.permissions import IsTenantMember
 from apps.access_control.services import enforce_organization_permission, enforce_project_permission
 from apps.audit.services import record_audit_event
 from apps.evidence.models import AttachmentMediaType, SubmissionAttachment
-from apps.projects.models import Project
+from apps.projects.models import Project, ProjectApprovalStatus, ProjectStatus
 from apps.projects.selectors import get_authorized_projects_for_user
+from apps.projects.services import ensure_project_allows_field_submissions
 from apps.tasks.models import Task, TaskCompletionEvidence
 from common.responses import api_success
 from .models import (
@@ -200,7 +201,13 @@ class SubmissionListCreateView(APIView):
         project = (
             authorized_projects.filter(id=project_id).first()
             if project_id
-            else authorized_projects.first()
+            else (
+                authorized_projects.filter(
+                    approval_status=ProjectApprovalStatus.APPROVED,
+                    status=ProjectStatus.ACTIVE,
+                ).first()
+                or authorized_projects.first()
+            )
         )
         if not project:
             raise ValidationError({"projectId": ["A valid authorized project is required to log a submission."]})
@@ -212,6 +219,7 @@ class SubmissionListCreateView(APIView):
             permission_codename="submissions.create",
             target_type="Submission",
         )
+        ensure_project_allows_field_submissions(project)
 
         ref_code = (
             body.get("identifier")

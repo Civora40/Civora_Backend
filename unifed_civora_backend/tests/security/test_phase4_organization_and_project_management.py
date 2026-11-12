@@ -25,6 +25,7 @@ from rest_framework.test import APIClient
 from apps.access_control.models import Role, SystemRoleSlug
 from apps.access_control.services import seed_canonical_roles_and_permissions
 from apps.audit.models import AuditLog
+from apps.notifications.models import Notification
 from apps.organizations.models import Organization, OrganizationInvitation, OrganizationMembership
 from apps.projects.models import (
     ActivityStatus,
@@ -282,16 +283,93 @@ class Phase4OrganizationAndProjectManagementTests(TestCase):
         )
         self.assertEqual(t_setup.status_code, status.HTTP_200_OK)
         self.assertEqual(t_setup.data["data"]["status"], "setup")
+        self.assertEqual(t_setup.data["data"]["approvalStatus"], "pending_review")
+        self.assertFalse(t_setup.data["data"]["canAcceptFieldSubmissions"])
 
-        # Valid transition: Setup -> Active
-        t_active = self.client.post(
+        # Governance Gate: Engineer CANNOT self-transition to 'active' or submit field logs before Admin approval
+        self_activate = self.client.post(
             f"/api/v1/projects/{project_id}/transition-status/",
-            {"status": "active", "reason": "Full earthworks and slipform paver deployed"},
+            {"status": "active", "reason": "Bypassing admin review"},
             format="json",
             **headers,
         )
-        self.assertEqual(t_active.status_code, status.HTTP_200_OK)
-        self.assertEqual(t_active.data["data"]["status"], "active")
+        self.assertEqual(self_activate.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Platform Administrator", str(self_activate.data))
+
+        blocked_sub = self.client.post(
+            "/api/v1/submissions/",
+            {
+                "projectId": project_id,
+                "title": "Unapproved Pour Request",
+                "description": "Should be blocked until Platform Admin approves project.",
+            },
+            format="json",
+            **headers,
+        )
+        self.assertEqual(blocked_sub.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(blocked_sub.data["error"]["code"], "project_approval_required")
+
+        # Engineer submits project for Admin Approval
+        submit_review = self.client.post(
+            f"/api/v1/projects/{project_id}/submit-for-approval/",
+            {"notes": "Ready for Platform Administrator permit and QA specification review."},
+            format="json",
+            **headers,
+        )
+        self.assertEqual(submit_review.status_code, status.HTTP_200_OK, submit_review.data)
+        self.assertEqual(submit_review.data["data"]["status"], "pending_approval")
+        self.assertEqual(submit_review.data["data"]["approvalStatus"], "pending_review")
+        self.assertTrue(
+            Notification.objects.filter(
+                recipient=self.admin_user, project_id=project_id, event_type="project.approval_required"
+            ).exists()
+        )
+
+        # Non-admin engineer cannot approve their own project
+        non_admin_review = self.client.post(
+            f"/api/v1/projects/{project_id}/review/",
+            {"decision": "approve"},
+            format="json",
+            **headers,
+        )
+        self.assertEqual(non_admin_review.status_code, status.HTTP_403_FORBIDDEN)
+
+        # Platform Admin reviews & approves project across tenants, unlocking active field operations
+        self.client.force_authenticate(user=self.admin_user)
+        admin_approve = self.client.post(
+            f"/api/v1/projects/{project_id}/review/",
+            {
+                "decision": "approve",
+                "notes": "LASBCA permit and Eurocode 2 pavement specs verified. Approved for field submissions.",
+                "targetStatus": "active",
+            },
+            format="json",
+        )
+        self.assertEqual(admin_approve.status_code, status.HTTP_200_OK, admin_approve.data)
+        self.assertEqual(admin_approve.data["data"]["status"], "active")
+        self.assertEqual(admin_approve.data["data"]["approvalStatus"], "approved")
+        self.assertTrue(admin_approve.data["data"]["isAdminApproved"])
+        self.assertTrue(admin_approve.data["data"]["canAcceptFieldSubmissions"])
+        self.assertTrue(
+            Notification.objects.filter(
+                recipient=self.pe_highway, project_id=project_id, event_type="project.approved"
+            ).exists()
+        )
+
+        # Restore PE auth and verify field submission is now unlocked
+        self.client.force_authenticate(user=self.pe_highway)
+        unlocked_sub = self.client.post(
+            "/api/v1/submissions/",
+            {
+                "projectId": project_id,
+                "title": "CH 12+200 Subgrade Compaction Plate Bearing Test",
+                "description": "Modulus EV2 verified at 145 MPa.",
+                "sourceChannel": "portal",
+            },
+            format="json",
+            **headers,
+        )
+        self.assertEqual(unlocked_sub.status_code, status.HTTP_201_CREATED, unlocked_sub.data)
 
         # 5. Create WBS Activities Under Project & Departments
         act1_res = self.client.post(
@@ -576,15 +654,37 @@ class Phase4OrganizationAndProjectManagementTests(TestCase):
             **headers,
         )
 
-        # Transition: Setup -> Active
-        t_active = self.client.post(
+        # Unapproved engineer cannot jump Setup -> Active directly
+        t_blocked_active = self.client.post(
             f"/api/v1/projects/{project_id}/transition-status/",
-            {"status": "active", "reason": "Basin cured and pump skids installed"},
+            {"status": "active", "reason": "Premature self-activation"},
             format="json",
             **headers,
         )
-        self.assertEqual(t_active.status_code, status.HTTP_200_OK)
-        self.assertEqual(t_active.data["data"]["status"], "active")
+        self.assertEqual(t_blocked_active.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # Unapproved project blocks field submissions
+        blocked_water_sub = self.client.post(
+            "/api/v1/submissions/",
+            {"projectId": project_id, "title": "Turbidity Log #1"},
+            format="json",
+            **headers,
+        )
+        self.assertEqual(blocked_water_sub.status_code, status.HTTP_403_FORBIDDEN)
+
+        # Platform Admin reviews & approves Water Treatment Plant (Setup -> Active)
+        self.client.force_authenticate(user=self.admin_user)
+        admin_approve_water = self.client.post(
+            f"/api/v1/projects/{project_id}/review/",
+            {"decision": "approve", "notes": "LSWC facility safety and WHO potable standards cleared."},
+            format="json",
+        )
+        self.assertEqual(admin_approve_water.status_code, status.HTTP_200_OK, admin_approve_water.data)
+        self.assertEqual(admin_approve_water.data["data"]["status"], "active")
+        self.assertTrue(admin_approve_water.data["data"]["canAcceptFieldSubmissions"])
+
+        # Switch back to Water PE for commissioning lifecycle
+        self.client.force_authenticate(user=self.pe_water)
 
         # Transition: Active -> Completed
         t_complete = self.client.post(
@@ -645,4 +745,152 @@ class Phase4OrganizationAndProjectManagementTests(TestCase):
         self.assertEqual(outsider_list.status_code, status.HTTP_200_OK)
         project_ids_visible = [p["id"] for p in outsider_list.data["data"]]
         self.assertNotIn(project_id, project_ids_visible)
+
+    # =========================================================================
+    # GOVERNANCE GATE: DEFAULT PENDING APPROVAL, REQUEST CHANGES & REJECTION
+    # =========================================================================
+    def test_engineer_project_review_request_changes_and_rejection_workflow(self):
+        """
+        Verifies end-to-end project governance gate:
+        - Engineer submitting status='active' is forced to 'pending_approval' & 'pending_review'.
+        - Admin can request_changes (requiring notes), notifying engineer and keeping submissions blocked.
+        - Admin can reject (requiring notes), blocking submissions with the rejection reason.
+        - Engineer can revise and resubmit via /submit-for-approval/.
+        - Admin approval unlocks 'active' status and allows field submissions.
+        """
+        headers = {"HTTP_X_ORGANIZATION_ID": str(self.org_highway.id)}
+        self.client.force_authenticate(user=self.pe_highway)
+
+        # Even if client payload tries status='active', backend enforces Admin review queue for engineers
+        create_res = self.client.post(
+            "/api/v1/projects/",
+            {
+                "name": "Third Mainland Structural Expansion Joint Renewal",
+                "code": "3MB-EXP-2026",
+                "client": "Federal Ministry of Works",
+                "status": "active",
+                "lasbcaPermitNumber": "PENDING-UPLOAD",
+            },
+            format="json",
+            **headers,
+        )
+        self.assertEqual(create_res.status_code, status.HTTP_201_CREATED, create_res.data)
+        p_data = create_res.data["data"]
+        project_id = p_data["id"]
+        self.assertEqual(p_data["status"], "pending_approval")
+        self.assertEqual(p_data["approvalStatus"], "pending_review")
+        self.assertFalse(p_data["isAdminApproved"])
+        self.assertFalse(p_data["canAcceptFieldSubmissions"])
+        self.assertTrue(
+            Notification.objects.filter(
+                recipient=self.admin_user, project_id=project_id, event_type="project.approval_required"
+            ).exists()
+        )
+
+        # Admin requesting changes without notes is rejected
+        self.client.force_authenticate(user=self.admin_user)
+        missing_notes = self.client.post(
+            f"/api/v1/projects/{project_id}/review/",
+            {"decision": "request_changes", "notes": ""},
+            format="json",
+        )
+        self.assertEqual(missing_notes.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # Admin requests changes with notes
+        req_changes = self.client.post(
+            f"/api/v1/projects/{project_id}/review/",
+            {
+                "decision": "request_changes",
+                "notes": "Provide valid LASBCA permit number and expansion joint shop drawings.",
+            },
+            format="json",
+        )
+        self.assertEqual(req_changes.status_code, status.HTTP_200_OK, req_changes.data)
+        self.assertEqual(req_changes.data["data"]["status"], "draft")
+        self.assertEqual(req_changes.data["data"]["approvalStatus"], "changes_requested")
+        self.assertFalse(req_changes.data["data"]["canAcceptFieldSubmissions"])
+        self.assertTrue(
+            Notification.objects.filter(
+                recipient=self.pe_highway, project_id=project_id, event_type="project.changes_requested"
+            ).exists()
+        )
+
+        # Field submission still blocked when changes requested
+        self.client.force_authenticate(user=self.pe_highway)
+        blocked_after_changes = self.client.post(
+            "/api/v1/submissions/",
+            {"projectId": project_id, "title": "Unauthorized Expansion Joint Log"},
+            format="json",
+            **headers,
+        )
+        self.assertEqual(blocked_after_changes.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn("requested changes", blocked_after_changes.data["error"]["message"])
+
+        # Engineer updates permit and resubmits for approval
+        patch_res = self.client.patch(
+            f"/api/v1/projects/{project_id}/",
+            {"lasbca_permit_number": "LASBCA/2026/BRG/0991"},
+            format="json",
+            **headers,
+        )
+        self.assertEqual(patch_res.status_code, status.HTTP_200_OK)
+
+        resubmit_res = self.client.post(
+            f"/api/v1/projects/{project_id}/submit-for-approval/",
+            {"notes": "Updated LASBCA permit LASBCA/2026/BRG/0991 attached."},
+            format="json",
+            **headers,
+        )
+        self.assertEqual(resubmit_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(resubmit_res.data["data"]["status"], "pending_approval")
+        self.assertEqual(resubmit_res.data["data"]["approvalStatus"], "pending_review")
+
+        # Admin rejects initially for missing traffic management approval, blocking field submissions
+        self.client.force_authenticate(user=self.admin_user)
+        reject_res = self.client.post(
+            f"/api/v1/projects/{project_id}/review/",
+            {"decision": "reject", "notes": "Missing LASTMA night closure permit."},
+            format="json",
+        )
+        self.assertEqual(reject_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(reject_res.data["data"]["status"], "rejected")
+        self.assertEqual(reject_res.data["data"]["approvalStatus"], "rejected")
+
+        self.client.force_authenticate(user=self.pe_highway)
+        blocked_rejected = self.client.post(
+            "/api/v1/submissions/",
+            {"projectId": project_id, "title": "Blocked Night Closure Work"},
+            format="json",
+            **headers,
+        )
+        self.assertEqual(blocked_rejected.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn("Missing LASTMA night closure permit", blocked_rejected.data["error"]["message"])
+
+        # Resubmit once LASTMA clearance is added, then Admin approves -> Field submission unlocked!
+        resubmit_2 = self.client.post(
+            f"/api/v1/projects/{project_id}/submit-for-approval/",
+            {"notes": "LASTMA permit uploaded."},
+            format="json",
+            **headers,
+        )
+        self.assertEqual(resubmit_2.status_code, status.HTTP_200_OK)
+
+        self.client.force_authenticate(user=self.admin_user)
+        approve_final = self.client.post(
+            f"/api/v1/projects/{project_id}/review/",
+            {"decision": "approve", "notes": "All permits verified. Cleared for field logging."},
+            format="json",
+        )
+        self.assertEqual(approve_final.status_code, status.HTTP_200_OK)
+        self.assertEqual(approve_final.data["data"]["status"], "active")
+        self.assertTrue(approve_final.data["data"]["canAcceptFieldSubmissions"])
+
+        self.client.force_authenticate(user=self.pe_highway)
+        final_sub = self.client.post(
+            "/api/v1/submissions/",
+            {"projectId": project_id, "title": "Span 4 Bearing Pad Inspection"},
+            format="json",
+            **headers,
+        )
+        self.assertEqual(final_sub.status_code, status.HTTP_201_CREATED, final_sub.data)
 

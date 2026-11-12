@@ -1,8 +1,11 @@
 """
 Project, ProjectDepartment, and ProjectMembership models (Phase 2 & 4).
-Enforces tenant and project boundaries and controlled lifecycle transitions:
-Draft -> Setup -> Active -> On Hold -> Completed -> Archived.
+Enforces tenant and project boundaries, mandatory Platform Admin review & approval
+before field submissions, and controlled lifecycle transitions:
+Draft -> Pending Approval / Setup -> Active -> On Hold -> Completed -> Archived.
 """
+from __future__ import annotations
+
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -11,19 +14,41 @@ from common.models import ProjectScopedModel, TenantScopedModel
 
 class ProjectStatus(models.TextChoices):
     DRAFT = "draft", "Draft"
+    PENDING_APPROVAL = "pending_approval", "Pending Admin Approval"
     SETUP = "setup", "Setup"
     ACTIVE = "active", "Active"
     ON_HOLD = "on_hold", "On Hold"
     COMPLETED = "completed", "Completed"
+    REJECTED = "rejected", "Rejected"
     ARCHIVED = "archived", "Archived"
 
 
+class ProjectApprovalStatus(models.TextChoices):
+    PENDING_REVIEW = "pending_review", "Pending Admin Review"
+    APPROVED = "approved", "Approved"
+    CHANGES_REQUESTED = "changes_requested", "Changes Requested"
+    REJECTED = "rejected", "Rejected"
+
+
 ALLOWED_PROJECT_TRANSITIONS = {
-    ProjectStatus.DRAFT: {ProjectStatus.SETUP, ProjectStatus.ARCHIVED},
-    ProjectStatus.SETUP: {ProjectStatus.ACTIVE, ProjectStatus.ON_HOLD, ProjectStatus.ARCHIVED},
+    ProjectStatus.DRAFT: {ProjectStatus.PENDING_APPROVAL, ProjectStatus.SETUP, ProjectStatus.ARCHIVED},
+    ProjectStatus.PENDING_APPROVAL: {
+        ProjectStatus.SETUP,
+        ProjectStatus.ACTIVE,
+        ProjectStatus.REJECTED,
+        ProjectStatus.DRAFT,
+        ProjectStatus.ARCHIVED,
+    },
+    ProjectStatus.SETUP: {
+        ProjectStatus.PENDING_APPROVAL,
+        ProjectStatus.ACTIVE,
+        ProjectStatus.ON_HOLD,
+        ProjectStatus.ARCHIVED,
+    },
     ProjectStatus.ACTIVE: {ProjectStatus.ON_HOLD, ProjectStatus.COMPLETED},
     ProjectStatus.ON_HOLD: {ProjectStatus.ACTIVE, ProjectStatus.ARCHIVED},
     ProjectStatus.COMPLETED: {ProjectStatus.ARCHIVED},
+    ProjectStatus.REJECTED: {ProjectStatus.DRAFT, ProjectStatus.PENDING_APPROVAL, ProjectStatus.ARCHIVED},
     ProjectStatus.ARCHIVED: set(),
 }
 
@@ -31,6 +56,8 @@ ALLOWED_PROJECT_TRANSITIONS = {
 class Project(TenantScopedModel):
     """
     Core construction or engineering project owned by an Organization.
+    Projects created by engineers must be reviewed and approved by a Platform Administrator
+    before transitioning to active field operations or accepting field submissions.
     """
 
     name = models.CharField(max_length=255)
@@ -44,6 +71,21 @@ class Project(TenantScopedModel):
         default=ProjectStatus.DRAFT,
         db_index=True,
     )
+    approval_status = models.CharField(
+        max_length=32,
+        choices=ProjectApprovalStatus.choices,
+        default=ProjectApprovalStatus.PENDING_REVIEW,
+        db_index=True,
+    )
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reviewed_projects",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_notes = models.TextField(blank=True, default="")
     lead_engineer_name = models.CharField(max_length=255, blank=True, default="")
     lasbca_permit_number = models.CharField(max_length=120, blank=True, default="")
     budget_formatted = models.CharField(max_length=80, blank=True, default="")
@@ -71,7 +113,37 @@ class Project(TenantScopedModel):
         ]
         indexes = [
             models.Index(fields=["organization", "status"], name="idx_project_org_status"),
+            models.Index(fields=["organization", "approval_status"], name="idx_project_org_approval"),
         ]
+
+    @property
+    def is_admin_approved(self) -> bool:
+        return self.approval_status == ProjectApprovalStatus.APPROVED
+
+    @property
+    def can_accept_field_submissions(self) -> bool:
+        return self.is_admin_approved and self.status == ProjectStatus.ACTIVE
+
+    def field_submission_block_reason(self) -> str | None:
+        if self.approval_status == ProjectApprovalStatus.REJECTED or self.status == ProjectStatus.REJECTED:
+            notes = f" Reason: {self.review_notes}" if self.review_notes else ""
+            return (
+                f"Field submissions are blocked: Project '{self.code}' was rejected during administrative review.{notes}"
+            )
+        if self.approval_status == ProjectApprovalStatus.CHANGES_REQUESTED:
+            notes = f" Admin notes: {self.review_notes}" if self.review_notes else ""
+            return (
+                f"Field submissions are blocked: Project '{self.code}' requires requested changes and re-approval from an Administrator.{notes}"
+            )
+        if not self.is_admin_approved:
+            return (
+                f"Field submissions are blocked: Project '{self.code}' is pending Platform Administrator review and approval."
+            )
+        if self.status != ProjectStatus.ACTIVE:
+            return (
+                f"Field submissions are blocked: Project '{self.code}' must be in 'active' status (currently '{self.status}')."
+            )
+        return None
 
     def can_transition_to(self, new_status: str) -> bool:
         if new_status == self.status:

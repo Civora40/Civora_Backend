@@ -39,6 +39,7 @@ from apps.projects.selectors import get_authorized_projects_for_user
 from apps.projects.services import (
     assign_user_to_project,
     create_project,
+    review_project,
     transition_project_status,
 )
 from apps.reports.models import (
@@ -243,9 +244,37 @@ class FoundationAndTenantIsolationTests(TestCase):
                 new_status=ProjectStatus.COMPLETED,
             )
 
-        # Valid transition: DRAFT -> SETUP -> ACTIVE
-        transition_project_status(project=self.project_alpha, new_status=ProjectStatus.SETUP)
-        transition_project_status(project=self.project_alpha, new_status=ProjectStatus.ACTIVE)
+        # Valid transition: DRAFT -> SETUP, but unapproved PE cannot self-transition to ACTIVE
+        transition_project_status(
+            project=self.project_alpha,
+            new_status=ProjectStatus.SETUP,
+            actor=self.pe_alpha,
+        )
+        with self.assertRaises(ValidationError):
+            transition_project_status(
+                project=self.project_alpha,
+                new_status=ProjectStatus.ACTIVE,
+                actor=self.pe_alpha,
+            )
+
+        # After Platform Admin reviews & approves, project transitions cleanly to ACTIVE
+        admin_user = create_user_account(
+            email="stateadmin@civora.io",
+            full_name="Lifecycle Admin",
+            password="SecurePassword123!",
+            is_platform_admin=True,
+        )
+        review_project(
+            project=self.project_alpha,
+            admin_user=admin_user,
+            decision="approve",
+            target_status=ProjectStatus.SETUP,
+        )
+        transition_project_status(
+            project=self.project_alpha,
+            new_status=ProjectStatus.ACTIVE,
+            actor=self.pe_alpha,
+        )
         self.assertEqual(self.project_alpha.status, ProjectStatus.ACTIVE)
 
     def test_audit_log_is_append_only_and_immutable(self):
@@ -757,6 +786,34 @@ class FoundationAndTenantIsolationTests(TestCase):
         self.client.force_authenticate(user=self.pe_alpha)
         org_header = {"HTTP_X_ORGANIZATION_ID": str(self.org_a.id)}
 
+        # 0. Field submissions MUST be blocked until Platform Admin reviews & approves project
+        blocked_sub = self.client.post(
+            reverse("submission-list"),
+            data={
+                "projectId": str(self.project_alpha.id),
+                "title": "Blocked Early Field Log",
+                "description": "Should be rejected before admin approval.",
+                "sourceChannel": "whatsapp",
+            },
+            format="json",
+            **org_header,
+        )
+        self.assertEqual(blocked_sub.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(blocked_sub.data["error"]["code"], "project_approval_required")
+
+        phase2_admin = create_user_account(
+            email="phase2admin@civora.io",
+            full_name="Phase 2 Admin",
+            password="SecurePassword123!",
+            is_platform_admin=True,
+        )
+        review_project(
+            project=self.project_alpha,
+            admin_user=phase2_admin,
+            decision="approve",
+            notes="Verified permit & specs for Phase 2 operations.",
+        )
+
         # 1. Create & list Submission via /api/v1/submissions/
         sub_create = self.client.post(
             reverse("submission-list"),
@@ -770,7 +827,7 @@ class FoundationAndTenantIsolationTests(TestCase):
             format="json",
             **org_header,
         )
-        self.assertEqual(sub_create.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(sub_create.status_code, status.HTTP_201_CREATED, sub_create.data)
         sub_id = sub_create.data["data"]["id"]
 
         sub_list = self.client.get(reverse("submission-list"), **org_header)

@@ -99,6 +99,10 @@ def serialize_project(project: Project) -> dict:
         else project.status
     )
 
+    block_reason = project.field_submission_block_reason()
+    reviewer = getattr(project, "reviewed_by", None)
+    creator = getattr(project, "created_by", None)
+
     departments = [
         serialize_project_department(d)
         for d in project.projects_projectdepartment_records.all()
@@ -125,6 +129,14 @@ def serialize_project(project: Project) -> dict:
         "location": project.location,
         "description": project.description,
         "status": project.status,
+        "approval_status": project.approval_status,
+        "is_admin_approved": project.is_admin_approved,
+        "can_accept_field_submissions": project.can_accept_field_submissions,
+        "field_submission_block_reason": block_reason,
+        "reviewed_by": str(reviewer.id) if reviewer else None,
+        "reviewed_at": project.reviewed_at.isoformat() if project.reviewed_at else None,
+        "review_notes": project.review_notes,
+        "created_by": str(creator.id) if creator else None,
         "start_date": project.start_date.isoformat() if project.start_date else None,
         "target_completion_date": (
             project.target_completion_date.isoformat() if project.target_completion_date else None
@@ -138,6 +150,18 @@ def serialize_project(project: Project) -> dict:
         "client": client_str,
         "clientName": client_str,
         "frontendStatus": fe_status,
+        "approvalStatus": project.approval_status,
+        "isAdminApproved": project.is_admin_approved,
+        "canAcceptFieldSubmissions": project.can_accept_field_submissions,
+        "fieldSubmissionBlockReason": block_reason,
+        "reviewedById": str(reviewer.id) if reviewer else None,
+        "reviewedByName": reviewer.full_name if reviewer else None,
+        "reviewedByEmail": reviewer.email if reviewer else None,
+        "reviewedAt": project.reviewed_at.isoformat() if project.reviewed_at else None,
+        "reviewNotes": project.review_notes,
+        "createdById": str(creator.id) if creator else None,
+        "createdByName": creator.full_name if creator else None,
+        "createdByEmail": creator.email if creator else None,
         "leadEngineer": lead_eng,
         "corenLeadEngineer": lead_eng,
         "lasbcaPermitNumber": project.lasbca_permit_number or meta.get("lasbcaPermitNumber") or "",

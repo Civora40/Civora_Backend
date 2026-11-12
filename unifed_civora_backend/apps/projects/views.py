@@ -1,9 +1,11 @@
-"""HTTP views for Projects domain (Phase 4)."""
-from django.core.exceptions import ValidationError as DjangoValidationError
+"""HTTP views for Projects domain (Phase 4 & Project Review/Approval Gate)."""
+from django.core.exceptions import PermissionDenied as DjangoPermissionDenied, ValidationError as DjangoValidationError
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from drf_spectacular.utils import OpenApiExample, extend_schema, inline_serializer
 from rest_framework import serializers, status
 from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 from apps.access_control.models import Role, SystemRoleSlug
 from apps.access_control.permissions import HasOrganizationCapability, IsTenantMember
@@ -11,12 +13,14 @@ from apps.access_control.services import enforce_project_permission
 from apps.audit.models import AuditLog
 from apps.audit.services import record_audit_event
 from apps.audit.views import serialize_audit_log
+from apps.organizations.models import Organization
 from apps.users.models import User
 from common.responses import api_success
 from .models import (
     ActivityStatus,
     Project,
     ProjectActivity,
+    ProjectApprovalStatus,
     ProjectDepartment,
     ProjectMembership,
     ProjectStatus,
@@ -33,14 +37,29 @@ from .serializers import (
 )
 from .services import (
     assign_user_to_project,
+    create_project,
     create_project_activity,
     create_project_department,
     delete_project_activity,
     delete_project_department,
+    notify_admins_project_pending_approval,
+    review_project,
+    submit_project_for_approval,
     transition_project_status,
     update_project_activity,
     update_project_department,
 )
+
+
+def _get_authorized_project(request, project_id):
+    if request.user.is_platform_admin and not request.headers.get("X-Organization-ID"):
+        qs = Project.objects.select_related("organization", "reviewed_by", "created_by").all()
+    else:
+        qs = get_authorized_projects_for_user(
+            user=request.user,
+            organization_id=request.organization.id,
+        ).select_related("organization", "reviewed_by", "created_by")
+    return get_object_or_404(qs, id=project_id)
 
 CreateProjectRequestSerializer = inline_serializer(
     name="CreateProjectRequest",
@@ -51,9 +70,9 @@ CreateProjectRequestSerializer = inline_serializer(
         "location": serializers.CharField(required=False, allow_blank=True),
         "description": serializers.CharField(required=False, allow_blank=True),
         "status": serializers.ChoiceField(
-            choices=["draft", "setup", "active", "planning"],
+            choices=["draft", "pending_approval", "setup", "active", "planning"],
             required=False,
-            default="active",
+            default="pending_approval",
         ),
         "leadEngineer": serializers.CharField(required=False, allow_blank=True),
         "lasbcaPermitNumber": serializers.CharField(required=False, allow_blank=True),
@@ -94,7 +113,16 @@ UpdateProjectRequestSerializer = inline_serializer(
         "specs_reference": serializers.CharField(required=False),
         "lasbca_permit_number": serializers.CharField(required=False),
         "status": serializers.ChoiceField(
-            choices=["draft", "setup", "active", "on_hold", "completed", "archived"],
+            choices=[
+                "draft",
+                "pending_approval",
+                "setup",
+                "active",
+                "on_hold",
+                "completed",
+                "rejected",
+                "archived",
+            ],
             required=False,
         ),
         "reason": serializers.CharField(required=False, allow_blank=True),
@@ -105,13 +133,53 @@ TransitionStatusRequestSerializer = inline_serializer(
     name="TransitionProjectStatusRequest",
     fields={
         "status": serializers.ChoiceField(
-            choices=["draft", "setup", "active", "on_hold", "completed", "archived"],
+            choices=[
+                "draft",
+                "pending_approval",
+                "setup",
+                "active",
+                "on_hold",
+                "completed",
+                "rejected",
+                "archived",
+            ],
             help_text="Target lifecycle status",
         ),
         "reason": serializers.CharField(
             required=False,
             allow_blank=True,
             help_text="Reason for status transition",
+        ),
+    },
+)
+
+ReviewProjectRequestSerializer = inline_serializer(
+    name="ReviewProjectRequest",
+    fields={
+        "decision": serializers.ChoiceField(
+            choices=["approve", "request_changes", "reject"],
+            help_text="Administrator decision on engineer-created project",
+        ),
+        "notes": serializers.CharField(
+            required=False,
+            allow_blank=True,
+            help_text="Review feedback or justification (required when rejecting or requesting changes)",
+        ),
+        "targetStatus": serializers.ChoiceField(
+            choices=["setup", "active"],
+            required=False,
+            help_text="Target status when approving (defaults to 'active')",
+        ),
+    },
+)
+
+SubmitProjectForApprovalRequestSerializer = inline_serializer(
+    name="SubmitProjectForApprovalRequest",
+    fields={
+        "notes": serializers.CharField(
+            required=False,
+            allow_blank=True,
+            help_text="Optional submission notes for the Platform Administrator",
         ),
     },
 )
@@ -170,7 +238,9 @@ class ProjectListView(APIView):
     )
     def get(self, request):
         if request.user.is_platform_admin and not request.headers.get("X-Organization-ID"):
-            projects = Project.objects.select_related("organization").prefetch_related(
+            projects = Project.objects.select_related(
+                "organization", "reviewed_by", "created_by"
+            ).prefetch_related(
                 "projects_projectdepartment_records",
                 "projects_projectmembership_records",
                 "projects_projectactivity_records",
@@ -179,29 +249,52 @@ class ProjectListView(APIView):
             projects = get_authorized_projects_for_user(
                 user=request.user,
                 organization_id=request.organization.id,
-            ).select_related("organization").prefetch_related(
+            ).select_related(
+                "organization", "reviewed_by", "created_by"
+            ).prefetch_related(
                 "projects_projectdepartment_records",
                 "projects_projectmembership_records",
                 "projects_projectactivity_records",
             )
+
+        status_filter = (request.query_params.get("status") or "").strip().lower()
+        approval_filter = (
+            request.query_params.get("approvalStatus")
+            or request.query_params.get("approval_status")
+            or ""
+        ).strip().lower()
+        if status_filter:
+            projects = projects.filter(status=status_filter)
+        if approval_filter:
+            projects = projects.filter(approval_status=approval_filter)
+
         serializer = ProjectSerializer(projects, many=True)
         return api_success(data=serializer.data)
 
     @extend_schema(
         tags=["Projects"],
         summary="Create a new infrastructure project",
-        description="Creates a new project under the active tenant organization, assigns the creator, and logs an audit event.",
+        description=(
+            "Creates a new project under the active tenant organization. Projects created by engineers "
+            "require Platform Administrator review and approval before transitioning to active or accepting "
+            "field submissions."
+        ),
         request=CreateProjectRequestSerializer,
         responses={201: ProjectSerializer},
     )
     def post(self, request):
+        body = request.data or {}
         org = request.organization
+        if request.user.is_platform_admin and (body.get("organizationId") or body.get("organization_id")):
+            org = get_object_or_404(
+                Organization, id=body.get("organizationId") or body.get("organization_id")
+            )
+
         if not request.user.is_platform_admin:
             membership = getattr(request, "organization_membership", None)
             if not membership or membership.role.slug == SystemRoleSlug.READ_ONLY_STAKEHOLDER:
                 raise PermissionDenied("Forbidden: Insufficient permissions to create projects.")
 
-        body = request.data or {}
         name = (body.get("name") or "").strip()
         code = (body.get("code") or "").strip().upper()
         client_name = (body.get("client") or body.get("client_name") or body.get("clientName") or "").strip()
@@ -231,19 +324,37 @@ class ProjectListView(APIView):
             [p for p in [body.get("city"), body.get("state"), body.get("country")] if p]
         ) or "Authorized Field Site"
 
-        req_status = (body.get("status") or "active").strip().lower()
-        if req_status == "planning":
-            db_status = ProjectStatus.SETUP
-        elif req_status in dict(ProjectStatus.choices):
-            db_status = req_status
+        req_status = (body.get("status") or "").strip().lower()
+        is_admin = bool(request.user.is_platform_admin)
+        if is_admin:
+            if req_status == "planning":
+                db_status = ProjectStatus.SETUP
+            elif req_status in dict(ProjectStatus.choices):
+                db_status = req_status
+            else:
+                db_status = ProjectStatus.ACTIVE
+            approval_status = ProjectApprovalStatus.APPROVED
+            reviewed_by = request.user
+            reviewed_at = timezone.now()
+            review_notes = body.get("reviewNotes") or "Auto-approved upon creation by Platform Administrator."
         else:
-            db_status = ProjectStatus.ACTIVE
+            # Engineers cannot self-approve a project into 'active' operations; it enters Admin review or stays draft/setup.
+            if req_status == ProjectStatus.DRAFT:
+                db_status = ProjectStatus.DRAFT
+            elif req_status in (ProjectStatus.SETUP, "planning"):
+                db_status = ProjectStatus.SETUP
+            else:
+                db_status = ProjectStatus.PENDING_APPROVAL
+            approval_status = ProjectApprovalStatus.PENDING_REVIEW
+            reviewed_by = None
+            reviewed_at = None
+            review_notes = ""
 
         specs_reference = body.get("specsReference") or "Eurocode 2 & FMWH Standard Specifications (C35/45)"
         project_type = body.get("projectType") or "Road / Highway"
         scope_summary = body.get("scopeSummary") or body.get("description") or ""
 
-        project = Project.objects.create(
+        project = create_project(
             organization=org,
             name=name,
             code=code,
@@ -251,11 +362,14 @@ class ProjectListView(APIView):
             location=location_str,
             description=body.get("description") or "",
             status=db_status,
+            approval_status=approval_status,
+            reviewed_by=reviewed_by,
+            reviewed_at=reviewed_at,
+            review_notes=review_notes,
             lead_engineer_name=body.get("leadEngineer") or request.user.full_name,
             lasbca_permit_number=body.get("lasbcaPermitNumber") or "",
             budget_formatted=formatted_budget,
             specs_reference=specs_reference,
-            progress_percent=0,
             project_metadata={
                 "projectType": project_type,
                 "contractRef": body.get("contractRef") or "",
@@ -315,12 +429,30 @@ class ProjectListView(APIView):
             actor=request.user,
             organization=org,
             project=project,
-            metadata={"code": project.code, "name": project.name, "initial_status": project.status},
+            metadata={
+                "code": project.code,
+                "name": project.name,
+                "initial_status": project.status,
+                "approval_status": project.approval_status,
+            },
         )
+
+        if project.status == ProjectStatus.PENDING_APPROVAL and not is_admin:
+            notify_admins_project_pending_approval(project=project, actor=request.user)
+            response_message = (
+                "Project created and submitted to Platform Administrator for review and approval "
+                "before field submissions can begin."
+            )
+        elif not is_admin:
+            response_message = (
+                "Project saved. Submit it for Platform Administrator review and approval before field submissions."
+            )
+        else:
+            response_message = "Project created and approved for field submissions."
 
         return api_success(
             data=serialize_project(project),
-            message="Project created successfully.",
+            message=response_message,
             status_code=status.HTTP_201_CREATED,
         )
 
@@ -336,11 +468,7 @@ class ProjectDetailView(APIView):
         responses={200: ProjectSerializer},
     )
     def get(self, request, project_id):
-        qs = get_authorized_projects_for_user(
-            user=request.user,
-            organization_id=request.organization.id,
-        )
-        project = get_object_or_404(qs, id=project_id)
+        project = _get_authorized_project(request, project_id)
         return api_success(data=serialize_project(project))
 
     @extend_schema(
@@ -350,14 +478,10 @@ class ProjectDetailView(APIView):
         responses={200: ProjectSerializer},
     )
     def patch(self, request, project_id):
-        qs = get_authorized_projects_for_user(
-            user=request.user,
-            organization_id=request.organization.id,
-        )
-        project = get_object_or_404(qs, id=project_id)
+        project = _get_authorized_project(request, project_id)
         enforce_project_permission(
             user=request.user,
-            organization=request.organization,
+            organization=project.organization,
             project=project,
             permission_codename="projects.update",
             target_type="Project",
@@ -395,7 +519,7 @@ class ProjectDetailView(APIView):
             target_type="Project",
             target_id=str(project.id),
             actor=request.user,
-            organization=request.organization,
+            organization=project.organization,
             project=project,
             metadata={"updated_fields": list(payload.keys())},
         )
@@ -414,14 +538,10 @@ class ProjectStatusTransitionView(APIView):
         responses={200: ProjectSerializer},
     )
     def post(self, request, project_id):
-        qs = get_authorized_projects_for_user(
-            user=request.user,
-            organization_id=request.organization.id,
-        )
-        project = get_object_or_404(qs, id=project_id)
+        project = _get_authorized_project(request, project_id)
         enforce_project_permission(
             user=request.user,
-            organization=request.organization,
+            organization=project.organization,
             project=project,
             permission_codename="projects.update",
             target_type="Project",
@@ -448,6 +568,103 @@ class ProjectStatusTransitionView(APIView):
         return api_success(
             data=serialize_project(project),
             message=f"Project status transitioned to '{project.status}'.",
+        )
+
+
+class ProjectSubmitForApprovalView(APIView):
+    """POST /api/v1/projects/<uuid:project_id>/submit-for-approval/"""
+
+    permission_classes = [IsTenantMember]
+
+    @extend_schema(
+        tags=["Projects"],
+        summary="Submit project to Platform Administrator for review & approval",
+        description=(
+            "Submits a draft, setup, or revised project for mandatory Platform Administrator review "
+            "before field submissions can begin."
+        ),
+        request=SubmitProjectForApprovalRequestSerializer,
+        responses={200: ProjectSerializer},
+    )
+    def post(self, request, project_id):
+        project = _get_authorized_project(request, project_id)
+        enforce_project_permission(
+            user=request.user,
+            organization=project.organization,
+            project=project,
+            permission_codename="projects.update",
+            target_type="Project",
+            target_id=str(project.id),
+        )
+        body = request.data or {}
+        notes = (body.get("notes") or body.get("reason") or "").strip()
+
+        try:
+            project = submit_project_for_approval(
+                project=project,
+                actor=request.user,
+                notes=notes,
+            )
+        except DjangoValidationError as exc:
+            raise ValidationError({"project": exc.messages})
+
+        return api_success(
+            data=serialize_project(project),
+            message=f"Project '{project.code}' submitted for Platform Administrator approval.",
+        )
+
+
+class ProjectReviewView(APIView):
+    """POST /api/v1/projects/<uuid:project_id>/review/"""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        tags=["Projects"],
+        summary="Platform Administrator review & approval decision for a project",
+        description=(
+            "Platform Administrators approve, request changes on, or reject engineer-created projects. "
+            "Field submissions remain locked until approved."
+        ),
+        request=ReviewProjectRequestSerializer,
+        responses={200: ProjectSerializer},
+    )
+    def post(self, request, project_id):
+        if not getattr(request.user, "is_platform_admin", False):
+            raise PermissionDenied(
+                "Only a Platform Administrator can review and approve projects for field submissions."
+            )
+
+        project = get_object_or_404(
+            Project.objects.select_related("organization", "reviewed_by", "created_by"),
+            id=project_id,
+        )
+        body = request.data or {}
+        decision = (body.get("decision") or "").strip().lower()
+        notes = (body.get("notes") or body.get("reason") or "").strip()
+        target_status = (body.get("targetStatus") or body.get("target_status") or "").strip().lower() or None
+
+        try:
+            project = review_project(
+                project=project,
+                admin_user=request.user,
+                decision=decision,
+                notes=notes,
+                target_status=target_status,
+            )
+        except DjangoPermissionDenied as exc:
+            raise PermissionDenied(str(exc))
+        except DjangoValidationError as exc:
+            raise ValidationError({"review": exc.messages})
+
+        outcome_messages = {
+            ProjectApprovalStatus.APPROVED: f"Project '{project.code}' approved for field submissions.",
+            ProjectApprovalStatus.CHANGES_REQUESTED: f"Changes requested on project '{project.code}'.",
+            ProjectApprovalStatus.REJECTED: f"Project '{project.code}' rejected during administrative review.",
+        }
+        return api_success(
+            data=serialize_project(project),
+            message=outcome_messages.get(project.approval_status, "Project review recorded."),
         )
 
 

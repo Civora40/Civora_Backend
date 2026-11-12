@@ -25,6 +25,12 @@ class TenantIsolationError(APIException):
     default_code = "tenant_isolation_violation"
 
 
+class ProjectApprovalRequiredError(APIException):
+    status_code = status.HTTP_403_FORBIDDEN
+    default_detail = "Project must be reviewed and approved by a Platform Administrator before field submissions can begin."
+    default_code = "project_approval_required"
+
+
 def civora_exception_handler(exc, context) -> Optional[Response]:
     """Custom DRF exception handler producing standardized error envelopes."""
     if isinstance(exc, DjangoValidationError):
@@ -57,12 +63,17 @@ def civora_exception_handler(exc, context) -> Optional[Response]:
     response = exception_handler(exc, context)
     if response is not None:
         code = getattr(exc, "default_code", "api_error")
+        msg = "Request could not be processed."
+        if isinstance(response.data, dict) and isinstance(response.data.get("detail"), str):
+            msg = response.data["detail"]
+        elif isinstance(response.data, str):
+            msg = response.data
         return Response(
             {
                 "success": False,
                 "error": {
                     "code": code,
-                    "message": "Request could not be processed.",
+                    "message": msg,
                     "details": response.data,
                 },
             },
