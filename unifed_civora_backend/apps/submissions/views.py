@@ -1,20 +1,39 @@
 """HTTP views for Field Operations Submissions & Evidence (Phase 2 & 5)."""
+from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.utils.dateparse import parse_date, parse_datetime
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
 from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.views import APIView
+
 from apps.access_control.models import SystemRoleSlug
 from apps.access_control.permissions import IsTenantMember
-from apps.access_control.services import enforce_organization_permission, enforce_project_permission
+from apps.access_control.services import (
+    enforce_organization_permission,
+    enforce_project_permission,
+)
 from apps.audit.services import record_audit_event
 from apps.evidence.models import AttachmentMediaType, SubmissionAttachment
-from apps.projects.models import Project, ProjectApprovalStatus, ProjectStatus
+from apps.evidence.services import (
+    format_file_size,
+    save_evidence_file,
+    serialize_attachment,
+)
+from apps.projects.models import (
+    Project,
+    ProjectActivity,
+    ProjectApprovalStatus,
+    ProjectDepartment,
+    ProjectStatus,
+)
 from apps.projects.selectors import get_authorized_projects_for_user
 from apps.projects.services import ensure_project_allows_field_submissions
 from apps.tasks.models import Task, TaskCompletionEvidence
 from common.responses import api_success
+
 from .models import (
     Submission,
     SubmissionChannel,
@@ -22,6 +41,23 @@ from .models import (
     SubmissionStatusHistory,
     SubmissionType,
 )
+from .services import (
+    add_submission_rfi,
+    link_submission_to_task,
+    transition_submission_status,
+)
+
+
+from decimal import Decimal, ROUND_HALF_UP
+
+def normalize_coordinate(val):
+    if val is None or val == "":
+        return None
+    try:
+        d = Decimal(str(val))
+        return d.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+    except Exception:
+        return None
 
 
 def serialize_submission(sub: Submission) -> dict:
@@ -31,7 +67,7 @@ def serialize_submission(sub: Submission) -> dict:
         SubmissionChannel.TELEGRAM: "telegram",
         SubmissionChannel.WEB_PORTAL: "portal",
         SubmissionChannel.MOBILE_APP: "portal",
-        SubmissionChannel.API_INGEST: "portal",
+        SubmissionChannel.API_INGEST: "api_ingest",
     }
     fe_channel = channel_map.get(sub.channel, "portal")
 
@@ -49,8 +85,8 @@ def serialize_submission(sub: Submission) -> dict:
     attachments_list = []
     evidence_items = []
     for att in sub.attachments.all():
-        size_kb = max(1, round((att.file_size_bytes or 0) / 1024))
-        size_fmt = f"{size_kb} KB" if size_kb < 1024 else f"{round(size_kb / 1024, 1)} MB"
+        size_fmt = format_file_size(att.file_size_bytes)
+        cat = "test_report" if att.media_type == AttachmentMediaType.DOCUMENT_PDF else "site_photo"
         attachments_list.append(
             {
                 "id": str(att.id),
@@ -64,20 +100,22 @@ def serialize_submission(sub: Submission) -> dict:
                 "fileSizeFormatted": size_fmt,
                 "checksum": att.sha256_checksum or "sha256-verified",
                 "receivedTime": att.created_at.isoformat() if att.created_at else "",
-                "downloadUrl": att.file_url or f"/api/evidence/{att.id}",
+                "downloadUrl": att.file_url or f"/api/v1/evidence/{att.id}/download/",
                 "processingStatus": "ready",
-                "category": "test_report" if att.media_type == AttachmentMediaType.DOCUMENT_PDF else "site_photo",
+                "category": cat,
+                "isVerified": att.is_verified,
             }
         )
         evidence_items.append(
             {
                 "id": str(att.id),
-                "type": "test_report" if att.media_type == AttachmentMediaType.DOCUMENT_PDF else "site_photo",
+                "type": cat,
                 "title": att.caption or att.file_name,
                 "filename": att.file_name,
                 "size": size_fmt,
                 "timestamp": att.created_at.isoformat() if att.created_at else "",
                 "verified": att.is_verified,
+                "downloadUrl": att.file_url or f"/api/v1/evidence/{att.id}/download/",
             }
         )
 
@@ -106,6 +144,12 @@ def serialize_submission(sub: Submission) -> dict:
         "reference_code": sub.reference_code,
         "projectId": str(sub.project_id),
         "projectName": sub.project.name if sub.project else "",
+        "departmentId": str(sub.department_id) if sub.department_id else None,
+        "departmentName": sub.department.name if sub.department else None,
+        "departmentCode": sub.department.code if sub.department else None,
+        "activityId": str(sub.activity_id) if sub.activity_id else None,
+        "activityName": sub.activity.name if sub.activity else None,
+        "activityCode": sub.activity.code if sub.activity else None,
         "reportingGroup": (
             sub.department.name
             if sub.department
@@ -114,18 +158,28 @@ def serialize_submission(sub: Submission) -> dict:
         "primaryCategory": payload.get("primaryCategory", "Site Work / Daily Progress"),
         "title": sub.title,
         "description": sub.raw_text,
+        "raw_text": sub.raw_text,
+        "submitted_at": sub.submitted_at.isoformat() if sub.submitted_at else "",
+        "server_received_at": sub.created_at.isoformat() if sub.created_at else "",
         "receivedDate": sub.submitted_at.isoformat() if sub.submitted_at else sub.created_at.isoformat(),
         "submittedBy": submitter_display,
+        "submitter_identifier": sub.submitter_identifier,
         "subcontractor": payload.get("subcontractor", sub.organization.name if sub.organization else ""),
         "reviewStatus": fe_status,
         "status": sub.status,
         "sourceChannel": fe_channel,
         "channel": sub.channel,
+        "submission_type": sub.submission_type,
         "senderName": submitter_display,
         "senderRole": payload.get("senderRole", "Site Engineer"),
         "senderDepartment": sub.department.name if sub.department else payload.get("senderDepartment", "Civil Works"),
         "senderVerificationStatus": payload.get("senderVerificationStatus", "verified"),
         "maskedContactReference": sub.submitter_identifier or payload.get("maskedContactReference", ""),
+        "gpsLatitude": float(sub.gps_latitude) if sub.gps_latitude is not None else None,
+        "gpsLongitude": float(sub.gps_longitude) if sub.gps_longitude is not None else None,
+        "location": sub.location_label,
+        "weather": sub.weather_condition,
+        "completenessScore": sub.completeness_score,
         "aiFlag": payload.get(
             "aiFlag",
             {
@@ -136,6 +190,7 @@ def serialize_submission(sub: Submission) -> dict:
                 "disclaimer": "AI advisory check only; final engineering authority rests with the COREN Project Engineer.",
             },
         ),
+        "structured_payload": payload,
         "evidenceItems": evidence_items,
         "attachments": attachments_list,
         "engineerNotes": sub.review_notes,
@@ -152,12 +207,13 @@ class SubmissionListCreateView(APIView):
     """GET, POST /api/v1/submissions/"""
 
     permission_classes = [IsTenantMember]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     @extend_schema(tags=["Submissions"], summary="List field submissions")
     def get(self, request):
         if request.user.is_platform_admin and not request.headers.get("X-Organization-ID"):
             qs = Submission.objects.select_related(
-                "organization", "project", "department", "submitted_by", "reviewed_by"
+                "organization", "project", "department", "activity", "submitted_by", "reviewed_by"
             ).prefetch_related("attachments", "status_history__changed_by")
         else:
             enforce_organization_permission(
@@ -174,12 +230,60 @@ class SubmissionListCreateView(APIView):
                 organization=request.organization,
                 project__in=authorized_projects,
             ).select_related(
-                "organization", "project", "department", "submitted_by", "reviewed_by"
+                "organization", "project", "department", "activity", "submitted_by", "reviewed_by"
             ).prefetch_related("attachments", "status_history__changed_by")
 
-        project_id = request.query_params.get("projectId")
+        project_id = request.query_params.get("projectId") or request.query_params.get("project")
         if project_id and project_id != "all":
             qs = qs.filter(project_id=project_id)
+
+        department_id = request.query_params.get("departmentId") or request.query_params.get("department")
+        if department_id and department_id != "all":
+            qs = qs.filter(department_id=department_id)
+
+        activity_id = request.query_params.get("activityId") or request.query_params.get("activity")
+        if activity_id and activity_id != "all":
+            qs = qs.filter(activity_id=activity_id)
+
+        status_param = request.query_params.get("status")
+        if status_param and status_param != "all":
+            reverse_map = {
+                "needs_information": SubmissionStatus.NEEDS_CLARIFICATION,
+                "approved": SubmissionStatus.APPROVED,
+                "rejected": SubmissionStatus.REJECTED,
+                "pending_review": SubmissionStatus.PENDING_REVIEW,
+                "received": SubmissionStatus.RECEIVED,
+                "validating": SubmissionStatus.VALIDATING,
+                "archived": SubmissionStatus.ARCHIVED,
+            }
+            sub_status = reverse_map.get(status_param, status_param)
+            qs = qs.filter(status=sub_status)
+
+        channel_param = request.query_params.get("channel")
+        if channel_param and channel_param != "all":
+            qs = qs.filter(channel=channel_param)
+
+        search = request.query_params.get("search")
+        if search:
+            qs = qs.filter(
+                Q(title__icontains=search)
+                | Q(raw_text__icontains=search)
+                | Q(reference_code__icontains=search)
+                | Q(submitter_name__icontains=search)
+                | Q(submitter_identifier__icontains=search)
+            )
+
+        date_from = request.query_params.get("date_from")
+        if date_from:
+            parsed_from = parse_datetime(date_from) or parse_date(date_from)
+            if parsed_from:
+                qs = qs.filter(submitted_at__gte=parsed_from)
+
+        date_to = request.query_params.get("date_to")
+        if date_to:
+            parsed_to = parse_datetime(date_to) or parse_date(date_to)
+            if parsed_to:
+                qs = qs.filter(submitted_at__lte=parsed_to)
 
         items = [serialize_submission(s) for s in qs]
         return api_success(
@@ -196,7 +300,7 @@ class SubmissionListCreateView(APIView):
     def post(self, request):
         body = request.data or {}
         org = request.organization
-        project_id = body.get("projectId") or body.get("project")
+        project_id = body.get("projectId") or body.get("project") or request.POST.get("projectId")
         authorized_projects = get_authorized_projects_for_user(user=request.user, organization_id=org.id)
         project = (
             authorized_projects.filter(id=project_id).first()
@@ -221,35 +325,113 @@ class SubmissionListCreateView(APIView):
         )
         ensure_project_allows_field_submissions(project)
 
+        # Department & Activity resolution
+        department = None
+        dept_id = body.get("departmentId") or body.get("department") or request.POST.get("departmentId")
+        if dept_id:
+            department = ProjectDepartment.objects.filter(id=dept_id, project=project).first()
+
+        activity = None
+        act_id = body.get("activityId") or body.get("activity") or request.POST.get("activityId")
+        if act_id:
+            activity = ProjectActivity.objects.filter(id=act_id, project=project).first()
+
         ref_code = (
             body.get("identifier")
             or body.get("reference_code")
+            or request.POST.get("reference_code")
             or f"SUB-{project.code}-{int(timezone.now().timestamp()) % 100000}"
         )
-        raw_channel = (body.get("sourceChannel") or body.get("channel") or "portal").lower()
-        channel_choice = (
-            SubmissionChannel.WHATSAPP
-            if raw_channel == "whatsapp"
-            else SubmissionChannel.TELEGRAM
-            if raw_channel == "telegram"
-            else SubmissionChannel.WEB_PORTAL
+
+        raw_channel = (
+            body.get("sourceChannel")
+            or body.get("channel")
+            or request.POST.get("channel")
+            or "portal"
+        ).lower()
+        channel_choices = {
+            "whatsapp": SubmissionChannel.WHATSAPP,
+            "telegram": SubmissionChannel.TELEGRAM,
+            "mobile_app": SubmissionChannel.MOBILE_APP,
+            "api_ingest": SubmissionChannel.API_INGEST,
+            "portal": SubmissionChannel.WEB_PORTAL,
+            "web_portal": SubmissionChannel.WEB_PORTAL,
+        }
+        channel_choice = channel_choices.get(raw_channel, SubmissionChannel.WEB_PORTAL)
+
+        raw_sub_type = (
+            body.get("submission_type")
+            or body.get("submissionType")
+            or request.POST.get("submission_type")
+            or SubmissionType.DAILY_PROGRESS
         )
+        valid_sub_types = [c[0] for c in SubmissionType.choices]
+        sub_type = raw_sub_type if raw_sub_type in valid_sub_types else SubmissionType.DAILY_PROGRESS
+
+        initial_status = body.get("status") or request.POST.get("status") or SubmissionStatus.PENDING_REVIEW
+        valid_statuses = [c[0] for c in SubmissionStatus.choices]
+        if initial_status not in valid_statuses:
+            initial_status = SubmissionStatus.PENDING_REVIEW
+
+        submitted_at_val = timezone.now()
+        raw_submitted_at = body.get("submitted_at") or body.get("submittedAt") or request.POST.get("submitted_at")
+        if raw_submitted_at:
+            parsed_dt = parse_datetime(raw_submitted_at) or parse_date(raw_submitted_at)
+            if parsed_dt:
+                submitted_at_val = parsed_dt
+
+        gps_lat = normalize_coordinate(
+            body.get("gpsLatitude") or body.get("gps_latitude") or request.POST.get("gpsLatitude")
+        )
+        gps_lon = normalize_coordinate(
+            body.get("gpsLongitude") or body.get("gps_longitude") or request.POST.get("gpsLongitude")
+        )
+        weather = body.get("weather") or body.get("weather_condition") or request.POST.get("weather") or ""
+
+        title = body.get("title") or request.POST.get("title") or "Field Progress Submission"
+        desc = (
+            body.get("description")
+            or body.get("raw_text")
+            or request.POST.get("description")
+            or request.POST.get("raw_text")
+            or ""
+        )
+        location = body.get("location") or request.POST.get("location") or project.location
 
         sub = Submission.objects.create(
             organization=org,
             project=project,
+            department=department,
+            activity=activity,
             submitted_by=request.user,
-            submitter_name=body.get("submittedBy") or request.user.full_name,
-            submitter_identifier=body.get("senderRaw") or request.user.phone_number or request.user.email,
+            submitter_name=(
+                body.get("submittedBy")
+                or body.get("senderName")
+                or request.POST.get("submittedBy")
+                or request.user.full_name
+            ),
+            submitter_identifier=(
+                body.get("senderRaw")
+                or body.get("submitter_identifier")
+                or request.POST.get("submitter_identifier")
+                or request.user.phone_number
+                or request.user.email
+            ),
             reference_code=ref_code,
             channel=channel_choice,
-            submission_type=body.get("submission_type") or SubmissionType.DAILY_PROGRESS,
-            status=SubmissionStatus.PENDING_REVIEW,
-            title=body.get("title") or "Field Progress Submission",
-            raw_text=body.get("description") or body.get("raw_text") or "",
-            location_label=body.get("location") or project.location,
+            submission_type=sub_type,
+            status=initial_status,
+            title=title,
+            raw_text=desc,
+            gps_latitude=gps_lat,
+            gps_longitude=gps_lon,
+            location_label=location,
+            weather_condition=weather,
+            submitted_at=submitted_at_val,
             structured_payload={
-                "reportingGroup": body.get("reportingGroup") or body.get("primaryCategory") or "Site Work / Daily Progress",
+                "reportingGroup": (
+                    department.name if department else body.get("reportingGroup") or "Site Work / Daily Progress"
+                ),
                 "primaryCategory": body.get("primaryCategory") or "Site Work / Daily Progress",
                 "senderVerificationStatus": body.get("senderVerificationStatus") or "verified",
                 "aiFlag": body.get("aiFlag")
@@ -268,11 +450,24 @@ class SubmissionListCreateView(APIView):
             project=project,
             submission=sub,
             from_status="",
-            to_status=SubmissionStatus.PENDING_REVIEW,
+            to_status=sub.status,
             changed_by=request.user,
             reason="Initial field submission recorded.",
         )
 
+        # Handle multipart files in request.FILES
+        for uploaded_file in request.FILES.getlist("files") or request.FILES.getlist("attachments"):
+            save_evidence_file(
+                file_obj=uploaded_file,
+                organization=org,
+                project=project,
+                submission=sub,
+                uploaded_by=request.user,
+                caption=uploaded_file.name,
+                is_verified=False,
+            )
+
+        # Handle JSON attachments array if provided
         for idx, att in enumerate(body.get("attachments") or []):
             fname = att.get("originalFilename") or att.get("file_name") or f"attachment_{idx + 1}.jpg"
             SubmissionAttachment.objects.create(
@@ -284,7 +479,8 @@ class SubmissionListCreateView(APIView):
                 storage_key=f"{org.code}/{project.code}/{sub.reference_code}/{int(timezone.now().timestamp())}_{idx}_{fname}",
                 mime_type=att.get("mimeType") or "image/jpeg",
                 file_size_bytes=int(att.get("fileSizeBytes") or 102400),
-                is_verified=True,
+                sha256_checksum=att.get("checksum") or "",
+                is_verified=att.get("is_verified", False),
             )
 
         record_audit_event(
@@ -310,6 +506,14 @@ class SubmissionDetailView(APIView):
     permission_classes = [IsTenantMember]
 
     def _get_submission(self, request, submission_id) -> Submission:
+        if request.user.is_platform_admin and not request.headers.get("X-Organization-ID"):
+            return get_object_or_404(
+                Submission.objects.select_related(
+                    "organization", "project", "department", "activity", "submitted_by", "reviewed_by"
+                ).prefetch_related("attachments", "status_history__changed_by"),
+                id=submission_id,
+            )
+
         authorized_projects = get_authorized_projects_for_user(
             user=request.user,
             organization_id=request.organization.id,
@@ -318,7 +522,9 @@ class SubmissionDetailView(APIView):
             Submission.objects.filter(
                 organization=request.organization,
                 project__in=authorized_projects,
-            ),
+            ).select_related(
+                "organization", "project", "department", "activity", "submitted_by", "reviewed_by"
+            ).prefetch_related("attachments", "status_history__changed_by"),
             id=submission_id,
         )
 
@@ -360,77 +566,236 @@ class SubmissionDetailView(APIView):
                 "pending_review": SubmissionStatus.PENDING_REVIEW,
                 "received": SubmissionStatus.RECEIVED,
             }
-            sub.status = reverse_map.get(new_fe_status, sub.status)
-            payload["reviewStatus"] = new_fe_status
-            sub.reviewed_by = request.user
-            sub.reviewed_at = timezone.now()
+            target_st = reverse_map.get(new_fe_status, sub.status)
+            if target_st != sub.status:
+                transition_submission_status(
+                    submission=sub,
+                    to_status=target_st,
+                    actor=request.user,
+                    reason=body.get("engineerNotes") or body.get("notes") or "",
+                )
 
         if "engineerNotes" in body or "notes" in body or "review_notes" in body:
             sub.review_notes = body.get("engineerNotes") or body.get("notes") or body.get("review_notes") or ""
+            sub.save(update_fields=["review_notes", "updated_at"])
 
         if "senderVerificationStatus" in body:
             payload["senderVerificationStatus"] = body["senderVerificationStatus"]
+            sub.structured_payload = payload
+            sub.save(update_fields=["structured_payload", "updated_at"])
 
         if "linkedTaskId" in body or "taskId" in body:
             task_id = body.get("linkedTaskId") or body.get("taskId")
-            payload["linkedTaskId"] = task_id
             task_obj = Task.objects.filter(project=sub.project, id=task_id).first()
             if task_obj:
-                payload["linkedTaskTitle"] = task_obj.title
-                TaskCompletionEvidence.objects.get_or_create(
-                    organization=sub.organization,
-                    project=sub.project,
-                    task=task_obj,
+                link_submission_to_task(
                     submission=sub,
-                    defaults={
-                        "submitted_by": request.user,
-                        "notes": body.get("note") or "Linked from submission review",
-                        "is_accepted": sub.status == SubmissionStatus.APPROVED,
-                    },
+                    task=task_obj,
+                    actor=request.user,
+                    notes=body.get("note") or "Linked from submission review",
                 )
 
         if "queryText" in body:
-            info_requests = list(payload.get("informationRequests") or [])
-            info_requests.insert(
-                0,
-                {
-                    "id": f"rfi_{int(timezone.now().timestamp())}",
-                    "submissionId": str(sub.id),
-                    "recipient": sub.submitter_name or "Field Submitter",
-                    "channel": body.get("channel") or "whatsapp",
-                    "requestedBy": request.user.full_name,
-                    "requestedAt": timezone.now().isoformat(),
-                    "queryText": body["queryText"],
-                    "dueDate": body.get("dueDate"),
-                    "status": "open",
-                },
+            add_submission_rfi(
+                submission=sub,
+                query_text=body["queryText"],
+                actor=request.user,
+                channel=body.get("channel") or "whatsapp",
+                due_date=body.get("dueDate"),
             )
-            payload["informationRequests"] = info_requests
-            sub.status = SubmissionStatus.NEEDS_CLARIFICATION
-            payload["reviewStatus"] = "needs_information"
 
-        sub.structured_payload = payload
-        sub.save()
+        # Refresh from DB
+        sub.refresh_from_db()
+        return api_success(data=serialize_submission(sub), message="Submission updated.")
 
-        if sub.status != old_status:
-            SubmissionStatusHistory.objects.create(
+
+class SubmissionTransitionStatusView(APIView):
+    """POST /api/v1/submissions/<uuid:submission_id>/transition-status/"""
+
+    permission_classes = [IsTenantMember]
+
+    @extend_schema(tags=["Submissions"], summary="Explicit state machine transition for submission")
+    def post(self, request, submission_id):
+        authorized_projects = get_authorized_projects_for_user(
+            user=request.user,
+            organization_id=request.organization.id,
+        )
+        sub = get_object_or_404(
+            Submission.objects.filter(
+                organization=request.organization,
+                project__in=authorized_projects,
+            ),
+            id=submission_id,
+        )
+
+        target_status = request.data.get("status")
+        if not target_status:
+            raise ValidationError({"status": ["Target status is required."]})
+
+        reason = request.data.get("reason") or request.data.get("notes") or ""
+        updated_sub = transition_submission_status(
+            submission=sub,
+            to_status=target_status,
+            actor=request.user,
+            reason=reason,
+        )
+        return api_success(
+            data=serialize_submission(updated_sub),
+            message=f"Submission status transitioned to {target_status}.",
+        )
+
+
+class SubmissionLinkTaskView(APIView):
+    """POST /api/v1/submissions/<uuid:submission_id>/link-task/"""
+
+    permission_classes = [IsTenantMember]
+
+    @extend_schema(tags=["Submissions"], summary="Link submission to a task as completion evidence")
+    def post(self, request, submission_id):
+        authorized_projects = get_authorized_projects_for_user(
+            user=request.user,
+            organization_id=request.organization.id,
+        )
+        sub = get_object_or_404(
+            Submission.objects.filter(
+                organization=request.organization,
+                project__in=authorized_projects,
+            ),
+            id=submission_id,
+        )
+
+        task_id = request.data.get("taskId") or request.data.get("linkedTaskId")
+        if not task_id:
+            raise ValidationError({"taskId": ["taskId is required."]})
+
+        task = get_object_or_404(Task.objects.filter(project=sub.project), id=task_id)
+        notes = request.data.get("notes") or request.data.get("note") or ""
+
+        evidence = link_submission_to_task(
+            submission=sub,
+            task=task,
+            actor=request.user,
+            notes=notes,
+        )
+        sub.refresh_from_db()
+        return api_success(
+            data={
+                "submission": serialize_submission(sub),
+                "evidenceId": str(evidence.id),
+                "taskId": str(task.id),
+                "taskCode": task.code,
+            },
+            message=f"Submission linked to task {task.code}.",
+        )
+
+
+class SubmissionRequestInfoView(APIView):
+    """POST /api/v1/submissions/<uuid:submission_id>/request-info/"""
+
+    permission_classes = [IsTenantMember]
+
+    @extend_schema(tags=["Submissions"], summary="Issue an RFI to the field submitter")
+    def post(self, request, submission_id):
+        authorized_projects = get_authorized_projects_for_user(
+            user=request.user,
+            organization_id=request.organization.id,
+        )
+        sub = get_object_or_404(
+            Submission.objects.filter(
+                organization=request.organization,
+                project__in=authorized_projects,
+            ),
+            id=submission_id,
+        )
+
+        query_text = request.data.get("queryText")
+        if not query_text:
+            raise ValidationError({"queryText": ["queryText is required."]})
+
+        channel = request.data.get("channel") or "whatsapp"
+        due_date = request.data.get("dueDate")
+
+        rfi = add_submission_rfi(
+            submission=sub,
+            query_text=query_text,
+            actor=request.user,
+            channel=channel,
+            due_date=due_date,
+        )
+        sub.refresh_from_db()
+        return api_success(
+            data={
+                "submission": serialize_submission(sub),
+                "rfi": rfi,
+            },
+            message="Clarification request dispatched.",
+        )
+
+
+class SubmissionAttachmentsView(APIView):
+    """POST /api/v1/submissions/<uuid:submission_id>/attachments/"""
+
+    permission_classes = [IsTenantMember]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    @extend_schema(tags=["Submissions"], summary="Attach uploaded file(s) directly to submission")
+    def post(self, request, submission_id):
+        authorized_projects = get_authorized_projects_for_user(
+            user=request.user,
+            organization_id=request.organization.id,
+        )
+        sub = get_object_or_404(
+            Submission.objects.filter(
+                organization=request.organization,
+                project__in=authorized_projects,
+            ),
+            id=submission_id,
+        )
+
+        enforce_project_permission(
+            user=request.user,
+            organization=sub.organization,
+            project=sub.project,
+            permission_codename="submissions.create",
+            target_type="SubmissionAttachment",
+        )
+        ensure_project_allows_field_submissions(sub.project)
+
+        files = request.FILES.getlist("file") or request.FILES.getlist("files") or request.FILES.getlist("attachments")
+        if not files:
+            file_single = request.FILES.get("file")
+            if file_single:
+                files = [file_single]
+
+        if not files:
+            raise ValidationError({"file": ["At least one file is required."]})
+
+        caption = request.data.get("caption") or request.POST.get("caption") or ""
+        created_attachments = []
+        for f in files:
+            att = save_evidence_file(
+                file_obj=f,
                 organization=sub.organization,
                 project=sub.project,
                 submission=sub,
-                from_status=old_status,
-                to_status=sub.status,
-                changed_by=request.user,
-                reason=sub.review_notes or f"Transitioned to {sub.status}",
+                uploaded_by=request.user,
+                caption=caption or f.name,
+                is_verified=False,
             )
+            created_attachments.append(serialize_attachment(att))
 
         record_audit_event(
-            action="submissions.updated",
+            action="evidence.attached_to_submission",
             target_type="Submission",
             target_id=str(sub.id),
             actor=request.user,
             organization=sub.organization,
             project=sub.project,
-            metadata={"status": sub.status, "reference_code": sub.reference_code},
+            metadata={"count": len(created_attachments), "reference_code": sub.reference_code},
         )
 
-        return api_success(data=serialize_submission(sub), message="Submission updated.")
+        return api_success(
+            data={"attachments": created_attachments, "count": len(created_attachments)},
+            message=f"{len(created_attachments)} evidence file(s) attached.",
+            status_code=status.HTTP_201_CREATED,
+        )
