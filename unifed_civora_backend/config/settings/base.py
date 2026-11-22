@@ -278,3 +278,24 @@ LOGGING = {
     },
 }
 
+# ==============================================================================
+# EXTERNAL CHANNEL INTEGRATIONS (Phase 6: WhatsApp & Telegram)
+# ==============================================================================
+WHATSAPP_ENABLED = get_env("WHATSAPP_ENABLED", default="true").lower() in ("true", "1", "yes")
+WHATSAPP_WEBHOOK_VERIFY_TOKEN = get_env(
+    "WHATSAPP_WEBHOOK_VERIFY_TOKEN", default="civora_wa_verify_token_dev_2026"
+)
+WHATSAPP_APP_SECRET = get_env(
+    "WHATSAPP_APP_SECRET", default="civora_wa_app_secret_dev_2026"
+)
+WHATSAPP_ACCESS_TOKEN = get_env("WHATSAPP_ACCESS_TOKEN", default="")
+WHATSAPP_PHONE_NUMBER_ID = get_env("WHATSAPP_PHONE_NUMBER_ID", default="")
+WHATSAPP_BUSINESS_ACCOUNT_ID = get_env("WHATSAPP_BUSINESS_ACCOUNT_ID", default="")
+
+TELEGRAM_ENABLED = get_env("TELEGRAM_ENABLED", default="true").lower() in ("true", "1", "yes")
+TELEGRAM_BOT_TOKEN = get_env("TELEGRAM_BOT_TOKEN", default="")
+TELEGRAM_WEBHOOK_SECRET_TOKEN = get_env(
+    "TELEGRAM_WEBHOOK_SECRET_TOKEN", default="civora_tg_secret_token_dev_2026"
+)
+
+

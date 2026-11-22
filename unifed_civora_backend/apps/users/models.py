@@ -98,3 +98,10 @@ class User(AbstractBaseUser, PermissionsMixin, TimestampedModel):
     def __str__(self) -> str:
         return f"{self.full_name} <{self.email}>"
 
+    def get_full_name(self) -> str:
+        return self.full_name or f"{self.first_name} {self.last_name}".strip() or self.email
+
+    def get_short_name(self) -> str:
+        return self.first_name or self.full_name or self.email
+
+
