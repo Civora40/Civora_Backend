@@ -12,6 +12,8 @@ from .views import (
     InboundWebhookEventListView,
     IngestionRunListView,
     IngestionRunRetryView,
+    TelegramConfigView,
+    TelegramConnectivityTestView,
     VerifiedContactViewSet,
 )
 from .webhooks import TelegramWebhookView, WhatsAppWebhookView
@@ -24,6 +26,9 @@ urlpatterns = [
     # Ingress Webhooks
     path("webhooks/whatsapp/", WhatsAppWebhookView.as_view(), name="whatsapp-webhook"),
     path("webhooks/telegram/", TelegramWebhookView.as_view(), name="telegram-webhook"),
+    # Telegram MTProto / App API Configuration & Connectivity
+    path("telegram/config/", TelegramConfigView.as_view(), name="telegram-config"),
+    path("telegram/test-connectivity/", TelegramConnectivityTestView.as_view(), name="telegram-test-connectivity"),
     # Simulation & Test Runner
     path("simulate/", InboundSimulationView.as_view(), name="inbound-simulate"),
     # Telemetry & DLQ Monitoring

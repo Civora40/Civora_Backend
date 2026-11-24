@@ -142,11 +142,21 @@ The integrations subsystem introduces four database models in `apps/integrations
   * Computes `hmac.new(key=WHATSAPP_APP_SECRET, msg=raw_body, digestmod=sha256).hexdigest()`.
   * Uses `hmac.compare_digest` to prevent timing attacks. Tampered or unsigned requests return HTTP 403 Forbidden.
 
-### 4.2. Telegram Bot API
+### 4.2. Telegram API & MTProto Gateway
+* **Credentials & Configuration:**
+  * `TELEGRAM_APP_API_ID`: `30212373`
+  * `TELEGRAM_APP_API_HASH`: `89fffb75ebbd496fef7da246bfbb849e`
+  * `TELEGRAM_DC_PROD_IP`: `149.154.167.50:443` (Data Center 2 Production)
+  * `TELEGRAM_DC_TEST_IP`: `149.154.167.40:443` (Data Center 2 Test Configuration)
+  * RSA 2048-bit Public Keys for production and test DC transport security.
 * **POST `/api/v1/integrations/webhooks/telegram/` (Update Ingestion):**
   * Reads header `X-Telegram-Bot-Api-Secret-Token`.
   * Validates constant-time match against `settings.TELEGRAM_WEBHOOK_SECRET_TOKEN`.
   * Rejects mismatched requests with HTTP 403 Forbidden.
+* **GET `/api/v1/integrations/telegram/config/`:**
+  * Returns sanitized Telegram App API configuration (App API ID, masked API Hash, active DC endpoint, and RSA key status).
+* **POST `/api/v1/integrations/telegram/test-connectivity/`:**
+  * Performs an active TCP socket probe to the Telegram Data Center and measures network latency.
 
 ### 4.3. Simulation Endpoint (Testing & CI/CD)
 * **POST `/api/v1/integrations/simulate/`:**

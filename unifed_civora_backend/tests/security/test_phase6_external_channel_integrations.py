@@ -516,3 +516,62 @@ class Phase6ExternalChannelIntegrationsTests(TestCase):
         self.assertEqual(event.status, EventStatus.PROCESSED)
         self.assertEqual(event.submission.submitted_by, new_engineer)
         self.assertEqual(event.submission.status, SubmissionStatus.PENDING_REVIEW)
+
+    # -------------------------------------------------------------------------
+    # 10. Telegram MTProto / App API Credentials & RSA Public Keys
+    # -------------------------------------------------------------------------
+    def test_telegram_app_api_config_and_rsa_keys(self):
+        """Validates that Telegram App credentials and RSA public keys parse correctly."""
+        from apps.integrations.adapters.telegram import (
+            get_telegram_connection_config,
+            validate_rsa_public_key,
+        )
+
+        self.assertEqual(settings.TELEGRAM_APP_API_ID, 30212373)
+        self.assertEqual(
+            settings.TELEGRAM_APP_API_HASH, "89fffb75ebbd496fef7da246bfbb849e"
+        )
+        self.assertEqual(settings.TELEGRAM_DC_PROD_IP, "149.154.167.50")
+        self.assertEqual(settings.TELEGRAM_DC_TEST_IP, "149.154.167.40")
+
+        # Validate production RSA public key
+        prod_meta = validate_rsa_public_key(settings.TELEGRAM_RSA_PUBLIC_KEY_PROD)
+        self.assertTrue(prod_meta["valid"])
+        self.assertEqual(prod_meta["key_size"], 2048)
+        self.assertEqual(prod_meta["algorithm"], "RSA")
+        self.assertIsNotNone(prod_meta["fingerprint"])
+
+        # Validate test RSA public key
+        test_meta = validate_rsa_public_key(settings.TELEGRAM_RSA_PUBLIC_KEY_TEST)
+        self.assertTrue(test_meta["valid"])
+        self.assertEqual(test_meta["key_size"], 2048)
+        self.assertEqual(test_meta["algorithm"], "RSA")
+
+    def test_telegram_config_endpoint(self):
+        """GET /api/v1/integrations/telegram/config/ returns sanitized App credentials and DC endpoints."""
+        url = "/api/v1/integrations/telegram/config/"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        data = response.json()
+
+        self.assertEqual(data["app_api_id"], 30212373)
+        self.assertEqual(data["app_api_hash_masked"], "89fffb••••849e")
+        self.assertEqual(data["production_dc_endpoint"], "149.154.167.50:443")
+        self.assertEqual(data["test_dc_endpoint"], "149.154.167.40:443")
+        self.assertTrue(data["rsa_production_key_valid"])
+        self.assertTrue(data["rsa_test_key_valid"])
+
+    def test_telegram_test_connectivity_endpoint(self):
+        """POST /api/v1/integrations/telegram/test-connectivity/ returns connectivity probe result."""
+        url = "/api/v1/integrations/telegram/test-connectivity/"
+        # Test probing localhost:9 (unbound echo port, returns instant refused without blocking network)
+        response = self.client.post(
+            url,
+            data={"ip": "127.0.0.1", "port": 9, "timeout": 0.5},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        data = response.json()
+        self.assertIn("target", data)
+        self.assertIn("latency_ms", data)
+

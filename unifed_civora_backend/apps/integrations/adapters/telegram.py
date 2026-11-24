@@ -1,12 +1,16 @@
 """
-Telegram Bot API Adapter (Phase 6).
+Telegram Messaging Adapter (Phase 6).
 Handles secret token webhook verification, Update object parsing,
-Telegram group chat_id extraction, and file streaming.
+Telegram group chat_id extraction, MTProto / App API credentials (api_id, api_hash),
+Data Center (DC) endpoints, RSA public key verification, and file streaming.
 """
 from __future__ import annotations
 
+import hashlib
 import hmac
 import logging
+import socket
+import time
 from typing import Any, Dict, Optional
 import urllib.request
 
@@ -17,8 +21,131 @@ from .base import BaseMessagingAdapter, NormalizedAttachment, NormalizedInboundM
 logger = logging.getLogger(__name__)
 
 
+def validate_rsa_public_key(pem_key: str) -> Dict[str, Any]:
+    """
+    Validates that a PEM RSA public key string parses correctly,
+    and returns key metadata including key size and SHA-256 fingerprint.
+    """
+    clean_pem = pem_key.strip()
+    try:
+        from cryptography.hazmat.primitives.serialization import load_pem_public_key
+
+        pk = load_pem_public_key(clean_pem.encode("utf-8"))
+        fingerprint = hashlib.sha256(clean_pem.encode("utf-8")).hexdigest()
+        return {
+            "valid": True,
+            "key_size": getattr(pk, "key_size", 2048),
+            "algorithm": "RSA",
+            "fingerprint": fingerprint,
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "valid": False,
+            "key_size": None,
+            "algorithm": "RSA",
+            "fingerprint": None,
+            "error": str(exc),
+        }
+
+
+def probe_telegram_dc_connectivity(
+    ip: Optional[str] = None, port: Optional[int] = None, timeout: float = 3.0
+) -> Dict[str, Any]:
+    """
+    Performs a lightweight TCP socket handshake probe to the Telegram Data Center.
+    Measures network round-trip latency in milliseconds.
+    """
+    target_ip = ip or getattr(
+        settings,
+        "TELEGRAM_DC_PROD_IP" if not getattr(settings, "TELEGRAM_USE_TEST_DC", False) else "TELEGRAM_DC_TEST_IP",
+        "149.154.167.50",
+    )
+    target_port = port or getattr(
+        settings,
+        "TELEGRAM_DC_PROD_PORT" if not getattr(settings, "TELEGRAM_USE_TEST_DC", False) else "TELEGRAM_DC_TEST_PORT",
+        443,
+    )
+
+    start_time = time.time()
+    try:
+        sock = socket.create_connection((target_ip, target_port), timeout=timeout)
+        sock.close()
+        elapsed_ms = round((time.time() - start_time) * 1000, 2)
+        return {
+            "connected": True,
+            "target": f"{target_ip}:{target_port}",
+            "latency_ms": elapsed_ms,
+            "error": None,
+        }
+    except Exception as exc:
+        elapsed_ms = round((time.time() - start_time) * 1000, 2)
+        return {
+            "connected": False,
+            "target": f"{target_ip}:{target_port}",
+            "latency_ms": elapsed_ms,
+            "error": str(exc),
+        }
+
+
+def get_telegram_connection_config() -> Dict[str, Any]:
+    """
+    Returns sanitized configuration status for the Telegram integration,
+    masking secret hashes for safe telemetry and admin inspection.
+    """
+    app_api_id = getattr(settings, "TELEGRAM_APP_API_ID", 30212373)
+    app_api_hash = getattr(settings, "TELEGRAM_APP_API_HASH", "")
+    use_test_dc = getattr(settings, "TELEGRAM_USE_TEST_DC", False)
+
+    masked_hash = (
+        f"{app_api_hash[:6]}••••{app_api_hash[-4:]}"
+        if len(app_api_hash) >= 10
+        else "configured" if app_api_hash else "not_configured"
+    )
+
+    active_ip = (
+        getattr(settings, "TELEGRAM_DC_TEST_IP", "149.154.167.40")
+        if use_test_dc
+        else getattr(settings, "TELEGRAM_DC_PROD_IP", "149.154.167.50")
+    )
+    active_port = (
+        getattr(settings, "TELEGRAM_DC_TEST_PORT", 443)
+        if use_test_dc
+        else getattr(settings, "TELEGRAM_DC_PROD_PORT", 443)
+    )
+
+    prod_key = getattr(settings, "TELEGRAM_RSA_PUBLIC_KEY_PROD", "")
+    test_key = getattr(settings, "TELEGRAM_RSA_PUBLIC_KEY_TEST", "")
+
+    prod_key_meta = validate_rsa_public_key(prod_key) if prod_key else {"valid": False}
+    test_key_meta = validate_rsa_public_key(test_key) if test_key else {"valid": False}
+
+    return {
+        "enabled": getattr(settings, "TELEGRAM_ENABLED", True),
+        "app_api_id": app_api_id,
+        "app_api_hash_masked": masked_hash,
+        "is_test_dc": use_test_dc,
+        "active_dc_endpoint": f"{active_ip}:{active_port}",
+        "production_dc_endpoint": f"{getattr(settings, 'TELEGRAM_DC_PROD_IP', '149.154.167.50')}:{getattr(settings, 'TELEGRAM_DC_PROD_PORT', 443)}",
+        "test_dc_endpoint": f"{getattr(settings, 'TELEGRAM_DC_TEST_IP', '149.154.167.40')}:{getattr(settings, 'TELEGRAM_DC_TEST_PORT', 443)}",
+        "rsa_production_key_valid": prod_key_meta.get("valid", False),
+        "rsa_production_key_fingerprint": prod_key_meta.get("fingerprint"),
+        "rsa_test_key_valid": test_key_meta.get("valid", False),
+        "rsa_test_key_fingerprint": test_key_meta.get("fingerprint"),
+        "webhook_configured": bool(getattr(settings, "TELEGRAM_WEBHOOK_SECRET_TOKEN", "")),
+    }
+
+
 class TelegramBotAdapter(BaseMessagingAdapter):
-    """Adapter for Telegram Bot API webhooks."""
+    """Adapter for Telegram Bot API webhooks and MTProto gateway."""
+
+    def get_config(self) -> Dict[str, Any]:
+        """Expose connection configuration for the adapter."""
+        return get_telegram_connection_config()
+
+    def probe_connectivity(self, timeout: float = 3.0) -> Dict[str, Any]:
+        """Probe live socket connection to Telegram DC."""
+        return probe_telegram_dc_connectivity(timeout=timeout)
 
     def verify_webhook(self, request) -> bool:
         """

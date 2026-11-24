@@ -540,7 +540,7 @@ def get_channel_telemetry() -> List[Dict[str, Any]]:
         {
             "channel": "telegram",
             "name": "Telegram Field Engineering Bot",
-            "identifier": "@CivoraFieldBot",
+            "identifier": f"@CivoraFieldBot (App ID: {getattr(settings, 'TELEGRAM_APP_API_ID', 30212373)})",
             "enabled": getattr(settings, "TELEGRAM_ENABLED", True),
         },
     ]

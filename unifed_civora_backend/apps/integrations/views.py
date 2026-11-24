@@ -119,6 +119,41 @@ class InboundWebhookEventListView(generics.ListAPIView):
     permission_classes = [permissions.AllowAny]
 
 
+from .adapters.telegram import (
+    get_telegram_connection_config,
+    probe_telegram_dc_connectivity,
+)
+
+
+class TelegramConfigView(APIView):
+    """
+    Surfaces the active Telegram App API ID, DC endpoints, and RSA public key verification status.
+    Masks the app_api_hash to preserve zero-trust credential hygiene.
+    """
+
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, *args, **kwargs):
+        config = get_telegram_connection_config()
+        return Response(config, status=status.HTTP_200_OK)
+
+
+class TelegramConnectivityTestView(APIView):
+    """
+    Performs a live network socket probe to the configured Telegram Data Center
+    and returns latency and connection status.
+    """
+
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request, *args, **kwargs):
+        ip = request.data.get("ip") if isinstance(request.data, dict) else None
+        port = request.data.get("port") if isinstance(request.data, dict) else None
+        timeout = float(request.data.get("timeout", 3.0)) if isinstance(request.data, dict) else 3.0
+        result = probe_telegram_dc_connectivity(ip=ip, port=port, timeout=timeout)
+        return Response(result, status=status.HTTP_200_OK)
+
+
 class ChannelBindingViewSet(viewsets.ModelViewSet):
     """Manages chat group and external channel bindings to projects."""
 
